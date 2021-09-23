@@ -2,7 +2,7 @@ use std::num::Wrapping;
 use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 // use std::time::Duration;
 // use tokio::prelude::*;
-use tokio::net::{UdpSocket,ToSocketAddrs} ;
+use tokio::net::{UdpSocket,ToSocketAddrs,lookup_host} ;
 use tokio::io;
 use crate::SnmpResult;
 use crate::SnmpPdu;
@@ -30,7 +30,7 @@ impl TokioSession {
     pub async fn new<SA>(destination: SA, community: &[u8], starting_req_id: i32, version:i32) -> io::Result<Self>
         where SA: ToSocketAddrs
     {
-        let socket = match destination.to_socket_addrs().await?.next() {
+        let socket = match lookup_host(&destination).await?.next() {
             Some(SocketAddr::V4(_)) => UdpSocket::bind((Ipv4Addr::new(0,0,0,0), 0)).await?,
             Some(SocketAddr::V6(_)) => UdpSocket::bind((Ipv6Addr::new(0,0,0,0,0,0,0,0), 0)).await?,
             None => panic!("empty list of socket addrs"),

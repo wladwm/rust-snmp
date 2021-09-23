@@ -11,8 +11,8 @@ keywords = ["networking", "snmp", "monitoring"]
 edition = "2018"
 
 [dependencies]
-tokio = "0.2"
-tokio-test = "0.2.1" 
-tokio-util = { version = "0.3", features = [ "codec", "udp" ] }
+tokio = { version="1.12.0", features = ["net"] }
+tokio-test = "0.4.2" 
+tokio-util = { version = "0.6.8", features = [ "codec" ] }
 serde = { version = "1.0.123", features = ["derive"] }
 
