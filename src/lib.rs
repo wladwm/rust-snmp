@@ -130,27 +130,27 @@ pub enum SnmpError {
     CommunityMismatch,
     ValueOutOfRange,
 
-    SendError,
-    ReceiveError,
+    SendError(String),
+    ReceiveError(String),
+    Timeout
 }
 impl fmt::Display for SnmpError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        let err_msg = match self {
-            SnmpError::AsnParseError   => "ASN Parse Error",
-            SnmpError::AsnInvalidLen  => "ASN Invalid length",
-            SnmpError::AsnWrongType   => "Wrong ASN Type",
-            SnmpError::AsnUnsupportedType => "UnSupported ASN Type",
-            SnmpError::AsnEof => "End of ASN ",
-            SnmpError::AsnIntOverflow => "ASN Overflow",
-            SnmpError::UnsupportedVersion => "Unsupported Snmp Version",
-            SnmpError::RequestIdMismatch => "SNMP Request ID mismatch",
-            SnmpError::CommunityMismatch => "Community mismatch",
-            SnmpError::ValueOutOfRange => "Value out of range",
-            SnmpError::SendError => "Snmp PDU Send Error",
-            SnmpError::ReceiveError => "Snmp Receive Error",
-            
-        };
-        write!(f, "{}", err_msg)
+        match self {
+            SnmpError::AsnParseError   => write!(f,"ASN Parse Error"),
+            SnmpError::AsnInvalidLen  => write!(f,"ASN Invalid length"),
+            SnmpError::AsnWrongType   => write!(f,"Wrong ASN Type"),
+            SnmpError::AsnUnsupportedType => write!(f,"UnSupported ASN Type"),
+            SnmpError::AsnEof => write!(f,"End of ASN"),
+            SnmpError::AsnIntOverflow => write!(f,"ASN Overflow"),
+            SnmpError::UnsupportedVersion => write!(f,"Unsupported Snmp Version"),
+            SnmpError::RequestIdMismatch => write!(f,"SNMP Request ID mismatch"),
+            SnmpError::CommunityMismatch => write!(f,"Community mismatch"),
+            SnmpError::ValueOutOfRange => write!(f,"Value out of range"),
+            SnmpError::SendError(s) => write!(f,"Snmp PDU Send Error({})",s),
+            SnmpError::ReceiveError(s) => write!(f,"Snmp Receive Error({})",s),
+            SnmpError::Timeout => write!(f,"Timeout"),
+        }
     }
 }
 
@@ -167,8 +167,9 @@ impl std::error::Error for SnmpError {
             SnmpError::RequestIdMismatch => "SNMP Request ID mismatch",
             SnmpError::CommunityMismatch => "Community mismatch",
             SnmpError::ValueOutOfRange => "Value out of range",
-            SnmpError::SendError => "Snmp PDU Send Error",
-            SnmpError::ReceiveError => "Snmp Receive Error",
+            SnmpError::SendError(_) => "Snmp PDU Send Error",
+            SnmpError::ReceiveError(_) => "Snmp Receive Error",
+            SnmpError::Timeout => "Timeout",
         }
     }
     fn cause(&self) -> Option<&dyn std::error::Error> {
@@ -1350,22 +1351,27 @@ impl SyncSession {
     }
 
     fn send_and_recv(socket: &UdpSocket, pdu: &pdu::Buf, out: &mut [u8]) -> SnmpResult<usize> {
-        if let Ok(_pdu_len) = socket.send(&pdu[..]) {
+        match socket.send(&pdu[..]) {
+          Ok(_pdu_len) => {
             match socket.recv(out) {
                 Ok(len) => Ok(len),
-                Err(_) => Err(SnmpError::ReceiveError)
+                Err(e) => Err(SnmpError::ReceiveError(format!("{}",e).to_string()))
             }
-        } else {
-            Err(SnmpError::SendError)
+          }
+          Err(e) => {
+            Err(SnmpError::SendError(format!("{}",e).to_string()))
+          }
         }
     }
 
     pub fn send_and_recv_repeat(socket: &UdpSocket, pdu: &pdu::Buf, out: &mut [u8], repeat:u32) -> SnmpResult<usize> {
-        let res = (0..repeat).find_map(|_| Self::send_and_recv(socket, pdu, out).ok() );
-        match res {
-           Some(x) => Ok(x),
-           None => Err(SnmpError::ReceiveError)
-        }
+        for _ in 1..repeat {
+            match Self::send_and_recv(socket, pdu, out) {
+                Ok(n) => return Ok(n),
+                Err(_) => {}
+            }
+        };
+        Self::send_and_recv(socket, pdu, out)
     }
 
     pub fn get(&mut self, name: &[u32], repeat:u32) -> SnmpResult<SnmpPdu> {
