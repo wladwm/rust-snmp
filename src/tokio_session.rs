@@ -48,26 +48,36 @@ impl TokioSession {
     }
 
     async fn send_and_recv(socket: &mut UdpSocket, pdu: &pdu::Buf, out: &mut [u8]) -> SnmpResult<usize> {
-        if let Ok(_pdu_len) = socket.send(&pdu[..]).await {
-            match socket.recv(out).await {
+        match socket.send(&pdu[..]).await {
+            Ok(_pdu_len) => {
+              match socket.recv(out).await {
                 Ok(len) => Ok(len),
-                Err(_) => Err(SnmpError::ReceiveError)
+                Err(e) => Err(SnmpError::ReceiveError(format!("{}",e).to_string()))
+              }
             }
-        } else {
-            Err(SnmpError::SendError)
+            Err(e) => {
+               Err(SnmpError::SendError(format!("{}",e).to_string()))
+            }
         }
     }
     
     async fn send_and_recv_repeat(socket: &mut UdpSocket, pdu: &pdu::Buf, out: &mut [u8], repeat:u32, timeout:Duration) -> SnmpResult<usize> {
-        for _ in 0..repeat {
-            if let Ok(result) = time::timeout(timeout, Self::send_and_recv(socket, pdu, out)).await {
-                if let Ok(len) = result {
-                    return Ok(len);
+        for _ in 1..repeat {
+            match time::timeout(timeout, Self::send_and_recv(socket, pdu, out)).await {
+                Err(_) => {},
+                Ok(result) => {
+                    if let Ok(len) = result {
+                        return Ok(len);
+                    }
                 }
             }
         }
-        Err(SnmpError::ReceiveError)
-        
+        match time::timeout(timeout, Self::send_and_recv(socket, pdu, out)).await {
+            Err(_) => return Err(SnmpError::Timeout),
+            Ok(result) => {
+                result
+            }
+        }
     }
     
     
