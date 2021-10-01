@@ -31,7 +31,7 @@ pub struct SNMPSession {
 impl SNMPSession {
     async fn send_and_recv(&mut self) -> SnmpResult<usize> {
         eprintln!("send_and_recv {:?}", self.host);
-        let _sent_bytes = match self.socket.send(&self.send_pdu[..]).await {
+        let _sent_bytes = match self.socket.send_to(&self.send_pdu[..],self.host).await {
             Err(e) => {
                 eprintln!("Send error: {}", e);
                 return Err(SnmpError::SendError(format!("{}", e).to_string()));
@@ -272,7 +272,6 @@ impl SNMPSocket {
         })
     }
     pub async fn run(&mut self, cancel: CancellationToken) {
-        eprintln!("SNMPSocket run started");
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => {
@@ -287,13 +286,14 @@ impl SNMPSocket {
                 }
             }
         }
-        eprintln!("SNMPSocket run done");
     }
     async fn recv_one(&mut self) -> std::io::Result<()> {
         let (len, addr) = self.socket.recv_from(&mut self.recv_buf).await?;
         if let Some(tx) = self.sessions.get(&addr.ip()) {
             if let Err(e) = tx.try_send(self.recv_buf[0..len].to_vec()) {
                 eprintln!("SNMP error pass response to {}: {}", addr, e);
+                self.sessions.remove(&addr.ip());
+                return Ok(());
             } else {
                 return Ok(());
             }
@@ -301,7 +301,5 @@ impl SNMPSocket {
             println!("Unknown host {:?} - {} bytes received from", addr, len);
             return Ok(());
         }
-        self.sessions.remove(&addr.ip());
-        Ok(())
     }
 }
