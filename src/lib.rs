@@ -106,7 +106,8 @@ use std::ptr;
 use std::time::Duration;
 use serde::{Serialize, Deserialize};
 
-pub mod tokio_session ;
+pub mod tokio_session;
+pub mod tokio_socket;
 
 #[cfg(target_pointer_width="32")]
 const USIZE_LEN: usize = 4;
