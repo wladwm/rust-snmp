@@ -30,17 +30,14 @@ pub struct SNMPSession {
 }
 impl SNMPSession {
     async fn send_and_recv(&mut self) -> SnmpResult<usize> {
-        eprintln!("send_and_recv {:?}", self.host);
         let _sent_bytes = match self.socket.send_to(&self.send_pdu[..],self.host).await {
             Err(e) => {
-                eprintln!("Send error: {}", e);
                 return Err(SnmpError::SendError(format!("{}", e).to_string()));
             }
             Ok(sendres) => sendres,
         };
         match self.rx.recv().await {
             None => {
-                eprintln!("Received None");
                 return Err(SnmpError::ReceiveError("Received None".to_string()));
             }
             Some(pdubuf) => {
@@ -291,14 +288,14 @@ impl SNMPSocket {
         let (len, addr) = self.socket.recv_from(&mut self.recv_buf).await?;
         if let Some(tx) = self.sessions.get(&addr.ip()) {
             if let Err(e) = tx.try_send(self.recv_buf[0..len].to_vec()) {
-                eprintln!("SNMP error pass response to {}: {}", addr, e);
+                eprintln!("Warning: SNMP error pass response to {}: {}", addr, e);
                 self.sessions.remove(&addr.ip());
                 return Ok(());
             } else {
                 return Ok(());
             }
         } else {
-            println!("Unknown host {:?} - {} bytes received from", addr, len);
+            println!("Warning: Unknown host {:?} - {} bytes received from", addr, len);
             return Ok(());
         }
     }
