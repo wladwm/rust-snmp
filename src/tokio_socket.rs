@@ -219,7 +219,7 @@ impl SNMPSession {
 pub struct SNMPSocket {
     socket: Arc<UdpSocket>,
     recv_buf: [u8; BUFFER_SIZE],
-    sessions: BTreeMap<IpAddr, Sender<Vec<u8>>>,
+    sessions: BTreeMap<SocketAddr, Sender<Vec<u8>>>,
 }
 
 impl SNMPSocket {
@@ -255,8 +255,16 @@ impl SNMPSocket {
             }
             Some(a) => a,
         };
+        if let Some(sess) = self.sessions.get(&socketaddr) {
+            if !sess.is_closed() {
+                return Err(std::io::Error::new(std::io::ErrorKind::AddrInUse,"Session already exists"));
+            }
+        }
         let (tx, rx) = channel(100);
-        self.sessions.insert(socketaddr.ip(), tx);
+        if tx.is_closed() {
+            return Err(std::io::Error::new(std::io::ErrorKind::AddrInUse,"Channel is closed"));
+        }
+        self.sessions.insert(socketaddr.clone(), tx);
         Ok(SNMPSession {
             socket: self.socket.clone(),
             community: community.to_vec(),
@@ -268,7 +276,14 @@ impl SNMPSocket {
             recv_buf: Vec::new(),
         })
     }
+    fn clear_closed_sessions(&mut self) {
+        self.sessions.retain(|_k,v|{!v.is_closed()})
+    }
+    pub fn sessions_count(&self) -> usize {
+        self.sessions.len()
+    }
     pub async fn run(&mut self, cancel: CancellationToken) {
+        self.clear_closed_sessions();
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => {
@@ -283,13 +298,14 @@ impl SNMPSocket {
                 }
             }
         }
+        self.clear_closed_sessions();
     }
     async fn recv_one(&mut self) -> std::io::Result<()> {
         let (len, addr) = self.socket.recv_from(&mut self.recv_buf).await?;
-        if let Some(tx) = self.sessions.get(&addr.ip()) {
+        if let Some(tx) = self.sessions.get(&addr) {
             if let Err(e) = tx.try_send(self.recv_buf[0..len].to_vec()) {
                 eprintln!("Warning: SNMP error pass response to {}: {}", addr, e);
-                self.sessions.remove(&addr.ip());
+                drop(self.sessions.remove(&addr));
                 return Ok(());
             } else {
                 return Ok(());
