@@ -251,7 +251,7 @@ impl SNMPSession {
             .await
     }
 }
-/// Asynchronous SNMP client for Tokio , so that it can work with actix
+#[derive(Clone)]
 pub struct SNMPSocket {
     socket: Arc<UdpSocket>,
     sessions: Arc<RwLock<BTreeMap<SocketAddr, Sender<Vec<u8>>>>>,
@@ -272,14 +272,16 @@ impl SNMPSocket {
         }
     }
     pub async fn session<SA: ToSocketAddrs>(
-        &mut self,
+        &self,
         hostaddr: SA,
         community: &[u8],
         starting_req_id: i32,
         version: i32,
     ) -> std::io::Result<SNMPSession> {
-        let socketaddr = match lookup_host(&hostaddr).await?.next() {
-            //TODO find compat address
+        let la=self.socket.local_addr()?;
+        let socketaddr = match lookup_host(&hostaddr).await?.find(|a|{
+            (a.is_ipv4() && la.is_ipv4()) || (a.is_ipv6() && la.is_ipv6())
+        }) {
             None => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::AddrNotAvailable,
