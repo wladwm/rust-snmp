@@ -10,27 +10,63 @@ use crate::SnmpPdu;
 use crate::SnmpResult;
 use crate::Value;
 use std::collections::BTreeMap;
-use std::net::IpAddr;
+//use std::net::IpAddr;
 use std::sync::Arc;
 use tokio::net::{lookup_host, ToSocketAddrs, UdpSocket};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
+use tokio::sync::RwLock;
 use tokio::time::{self, Duration};
 use tokio_util::sync::CancellationToken;
 const BUFFER_SIZE: usize = 4096;
 
 pub struct SNMPSession {
     socket: Arc<UdpSocket>,
-    pub community: Vec<u8>,
-    pub req_id: Wrapping<i32>,
-    pub version: i32,
+    community: Vec<u8>,
+    req_id: Wrapping<i32>,
+    version: i32,
     pub host: SocketAddr,
     rx: Receiver<Vec<u8>>,
     send_pdu: pdu::Buf,
     recv_buf: Vec<u8>,
 }
 impl SNMPSession {
+    pub fn host(&self) -> &SocketAddr {
+        &self.host
+    }
+    pub fn set_host(&mut self, new_host: SocketAddr) {
+        self.host = new_host;
+    }
+    pub fn last_req_id(&self) -> i32 {
+        self.req_id.0
+    }
+    pub fn set_last_req_id(&mut self, reqid: i32) {
+        self.req_id.0 = reqid;
+    }
+    pub fn snmp_version(&self) -> i32 {
+        self.version
+    }
+    pub fn set_snmp_version(&mut self, v: i32) -> SnmpResult<()> {
+        if v == 1 || v == 2 {
+            self.version = v;
+            Ok(())
+        } else {
+            Err(SnmpError::ValueOutOfRange)
+        }
+    }
+    pub fn snmp_community(&self) -> &Vec<u8> {
+        &self.community
+    }
+    pub fn set_snmp_community(&mut self, community: &[u8]) -> SnmpResult<()> {
+        if community.len() < 1 {
+            return Err(SnmpError::CommunityMismatch);
+        }
+        self.community.resize(community.len(), 0);
+        self.community.as_mut_slice().copy_from_slice(community);
+        Ok(())
+    }
+
     async fn send_and_recv(&mut self) -> SnmpResult<usize> {
-        let _sent_bytes = match self.socket.send_to(&self.send_pdu[..],self.host).await {
+        let _sent_bytes = match self.socket.send_to(&self.send_pdu[..], self.host).await {
             Err(e) => {
                 return Err(SnmpError::SendError(format!("{}", e).to_string()));
             }
@@ -218,8 +254,7 @@ impl SNMPSession {
 /// Asynchronous SNMP client for Tokio , so that it can work with actix
 pub struct SNMPSocket {
     socket: Arc<UdpSocket>,
-    recv_buf: [u8; BUFFER_SIZE],
-    sessions: BTreeMap<SocketAddr, Sender<Vec<u8>>>,
+    sessions: Arc<RwLock<BTreeMap<SocketAddr, Sender<Vec<u8>>>>>,
 }
 
 impl SNMPSocket {
@@ -227,15 +262,13 @@ impl SNMPSocket {
         let socket = UdpSocket::bind((std::net::Ipv4Addr::new(0, 0, 0, 0), 0)).await?;
         Ok(Self {
             socket: Arc::new(socket),
-            recv_buf: [0; 4096],
-            sessions: BTreeMap::new(),
+            sessions: Arc::new(RwLock::new(BTreeMap::new())),
         })
     }
     pub fn from_socket(socket: UdpSocket) -> Self {
         Self {
             socket: Arc::new(socket),
-            recv_buf: [0; 4096],
-            sessions: BTreeMap::new(),
+            sessions: Arc::new(RwLock::new(BTreeMap::new())),
         }
     }
     pub async fn session<SA: ToSocketAddrs>(
@@ -255,16 +288,22 @@ impl SNMPSocket {
             }
             Some(a) => a,
         };
-        if let Some(sess) = self.sessions.get(&socketaddr) {
+        if let Some(sess) = self.sessions.read().await.get(&socketaddr) {
             if !sess.is_closed() {
-                return Err(std::io::Error::new(std::io::ErrorKind::AddrInUse,"Session already exists"));
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AddrInUse,
+                    "Session already exists",
+                ));
             }
         }
         let (tx, rx) = channel(100);
         if tx.is_closed() {
-            return Err(std::io::Error::new(std::io::ErrorKind::AddrInUse,"Channel is closed"));
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::AddrInUse,
+                "Channel is closed",
+            ));
         }
-        self.sessions.insert(socketaddr.clone(), tx);
+        self.sessions.write().await.insert(socketaddr.clone(), tx);
         Ok(SNMPSession {
             socket: self.socket.clone(),
             community: community.to_vec(),
@@ -276,21 +315,21 @@ impl SNMPSocket {
             recv_buf: Vec::new(),
         })
     }
-    fn clear_closed_sessions(&mut self) {
-        self.sessions.retain(|_k,v|{!v.is_closed()})
+    async fn clear_closed_sessions(&self) {
+        self.sessions.write().await.retain(|_k, v| !v.is_closed())
     }
-    pub fn sessions_count(&self) -> usize {
-        self.sessions.len()
-    }
-    pub async fn run(&mut self, cancel: CancellationToken) {
-        self.clear_closed_sessions();
+    pub async fn run(&self, cancel: CancellationToken) {
+        self.clear_closed_sessions().await;
+        let mut buf = Vec::<u8>::new();
+        buf.resize(BUFFER_SIZE, 0);
+        let mbuf = buf.as_mut_slice();
         loop {
             tokio::select! {
                 _ = cancel.cancelled() => {
                     // The token was cancelled
                     break;
                 }
-                i = self.recv_one() => {
+                i = self.recv_one(mbuf) => {
                     match i {
                         Err(_) => break,
                         Ok(_) => {}
@@ -298,20 +337,23 @@ impl SNMPSocket {
                 }
             }
         }
-        self.clear_closed_sessions();
+        self.clear_closed_sessions().await;
     }
-    async fn recv_one(&mut self) -> std::io::Result<()> {
-        let (len, addr) = self.socket.recv_from(&mut self.recv_buf).await?;
-        if let Some(tx) = self.sessions.get(&addr) {
-            if let Err(e) = tx.try_send(self.recv_buf[0..len].to_vec()) {
+    async fn recv_one(&self, buf: &mut [u8]) -> std::io::Result<()> {
+        let (len, addr) = self.socket.recv_from(buf).await?;
+        if let Some(tx) = self.sessions.read().await.get(&addr) {
+            if let Err(e) = tx.try_send(buf[0..len].to_vec()) {
                 eprintln!("Warning: SNMP error pass response to {}: {}", addr, e);
-                drop(self.sessions.remove(&addr));
+                drop(self.sessions.write().await.remove(&addr));
                 return Ok(());
             } else {
                 return Ok(());
             }
         } else {
-            println!("Warning: Unknown host {:?} - {} bytes received from", addr, len);
+            println!(
+                "Warning: Unknown host {:?} - {} bytes received from",
+                addr, len
+            );
             return Ok(());
         }
     }
