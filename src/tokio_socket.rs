@@ -14,9 +14,8 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::net::{lookup_host, ToSocketAddrs, UdpSocket};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
-use tokio::sync::RwLock;
+use tokio::sync::{RwLock,Mutex};
 use tokio::time::{self, Duration};
-use tokio_util::sync::CancellationToken;
 const BUFFER_SIZE: usize = 4096;
 
 pub struct SNMPSession {
@@ -252,91 +251,36 @@ impl SNMPSession {
     }
 }
 #[derive(Clone)]
-pub struct SNMPSocket {
+struct SNMPSocketInner {
     socket: Arc<UdpSocket>,
     sessions: Arc<RwLock<BTreeMap<SocketAddr, Sender<Vec<u8>>>>>,
 }
-
-impl SNMPSocket {
-    pub async fn new() -> std::io::Result<Self> {
+impl SNMPSocketInner {
+    async fn new() -> std::io::Result<Self> {
         let socket = UdpSocket::bind((std::net::Ipv4Addr::new(0, 0, 0, 0), 0)).await?;
         Ok(Self {
             socket: Arc::new(socket),
             sessions: Arc::new(RwLock::new(BTreeMap::new())),
         })
     }
-    pub fn from_socket(socket: UdpSocket) -> Self {
+    fn from_socket(socket: UdpSocket) -> Self {
         Self {
             socket: Arc::new(socket),
             sessions: Arc::new(RwLock::new(BTreeMap::new())),
         }
     }
-    pub async fn session<SA: ToSocketAddrs>(
-        &self,
-        hostaddr: SA,
-        community: &[u8],
-        starting_req_id: i32,
-        version: i32,
-    ) -> std::io::Result<SNMPSession> {
-        let la=self.socket.local_addr()?;
-        let socketaddr = match lookup_host(&hostaddr).await?.find(|a|{
-            (a.is_ipv4() && la.is_ipv4()) || (a.is_ipv6() && la.is_ipv6())
-        }) {
-            None => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::AddrNotAvailable,
-                    "Lookup",
-                ))
-            }
-            Some(a) => a,
-        };
-        if let Some(sess) = self.sessions.read().await.get(&socketaddr) {
-            if !sess.is_closed() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::AddrInUse,
-                    "Session already exists",
-                ));
-            }
-        }
-        let (tx, rx) = channel(100);
-        if tx.is_closed() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::AddrInUse,
-                "Channel is closed",
-            ));
-        }
-        self.sessions.write().await.insert(socketaddr.clone(), tx);
-        Ok(SNMPSession {
-            socket: self.socket.clone(),
-            community: community.to_vec(),
-            req_id: Wrapping(starting_req_id),
-            version,
-            host: socketaddr,
-            rx,
-            send_pdu: pdu::Buf::default(),
-            recv_buf: Vec::new(),
-        })
-    }
     async fn clear_closed_sessions(&self) {
         self.sessions.write().await.retain(|_k, v| !v.is_closed())
     }
-    pub async fn run(&self, cancel: CancellationToken) {
+    async fn run(&self) {
         self.clear_closed_sessions().await;
         let mut buf = Vec::<u8>::new();
         buf.resize(BUFFER_SIZE, 0);
         let mbuf = buf.as_mut_slice();
         loop {
-            tokio::select! {
-                _ = cancel.cancelled() => {
-                    // The token was cancelled
-                    break;
-                }
-                i = self.recv_one(mbuf) => {
-                    match i {
-                        Err(_) => break,
-                        Ok(_) => {}
-                    }
-                }
+            match self.recv_one(mbuf).await {
+                Err(_) => break,
+                Ok(_) => {}
             }
         }
         self.clear_closed_sessions().await;
@@ -346,7 +290,12 @@ impl SNMPSocket {
         if let Some(tx) = self.sessions.read().await.get(&addr) {
             if let Err(e) = tx.try_send(buf[0..len].to_vec()) {
                 eprintln!("Warning: SNMP error pass response to {}: {}", addr, e);
-                drop(self.sessions.write().await.remove(&addr));
+                self.clear_closed_sessions().await;
+                let mut grd=self.sessions.write().await;
+                drop(grd.remove(&addr));
+                if grd.len()<1 {
+                    return Err(std::io::Error::new(std::io::ErrorKind::Other, e));
+                }
                 return Ok(());
             } else {
                 return Ok(());
@@ -358,5 +307,75 @@ impl SNMPSocket {
             );
             return Ok(());
         }
+    }
+}
+#[derive(Clone)]
+pub struct SNMPSocket {
+    inner: SNMPSocketInner,
+    recv_task: Arc<Mutex<Option<tokio::task::JoinHandle<()>>>>,
+}
+
+impl SNMPSocket {
+    pub async fn new() -> std::io::Result<Self> {
+        Ok(Self {
+            inner: SNMPSocketInner::new().await?,
+            recv_task: Arc::new(Mutex::new(None))
+        })
+    }
+    pub fn from_socket(socket: UdpSocket) -> Self {
+        Self {
+            inner: SNMPSocketInner::from_socket(socket),
+            recv_task: Arc::new(Mutex::new(None))
+        }
+    }
+    pub async fn session<SA: ToSocketAddrs>(
+        &self,
+        hostaddr: SA,
+        community: &[u8],
+        starting_req_id: i32,
+        version: i32,
+    ) -> std::io::Result<SNMPSession> {
+        let la=self.inner.socket.local_addr()?;
+        let socketaddr = match lookup_host(&hostaddr).await?.find(|a|{
+            (a.is_ipv4() && la.is_ipv4()) || (a.is_ipv6() && la.is_ipv6())
+        }) {
+            None => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AddrNotAvailable,
+                    "Lookup",
+                ))
+            }
+            Some(a) => a,
+        };
+        if let Some(sess) = self.inner.sessions.read().await.get(&socketaddr) {
+            if !sess.is_closed() {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AddrInUse,
+                    "Session already exists",
+                ));
+            }
+        }
+        let (tx, rx) = channel(100);
+        self.inner.sessions.write().await.insert(socketaddr.clone(), tx);
+        {
+            let mut rt_g=self.recv_task.lock().await;
+            let inner = self.inner.clone();
+            if rt_g.is_none() {
+                *rt_g=Some(tokio::spawn(async move {
+                    inner.run().await;
+                    ()
+                }));
+            }
+        }
+        Ok(SNMPSession {
+            socket: self.inner.socket.clone(),
+            community: community.to_vec(),
+            req_id: Wrapping(starting_req_id),
+            version,
+            host: socketaddr,
+            rx,
+            send_pdu: pdu::Buf::default(),
+            recv_buf: Vec::new(),
+        })
     }
 }
