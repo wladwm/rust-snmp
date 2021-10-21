@@ -289,24 +289,26 @@ impl SNMPSocketInner {
     }
     async fn recv_one(&self, buf: &mut [u8]) -> std::io::Result<()> {
         let (len, addr) = self.socket.recv_from(buf).await?;
-        if let Some(tx) = self.sessions.read().await.get(&addr) {
-            if let Err(e) = tx.try_send(buf[0..len].to_vec()) {
-                eprintln!("Warning: SNMP error pass response to {}: {}", addr, e);
-                if self.clear_closed_sessions().await<1 {
-                    //stop receive task
-                    return Err(std::io::Error::new(std::io::ErrorKind::Other, e));
-                }
+        let res = match self.sessions.read().await.get(&addr) {
+            None => {
+                println!(
+                    "Warning: Unknown host {:?} - {} bytes received from",
+                    addr, len
+                );
                 return Ok(());
-            } else {
-                return Ok(());
+            },
+            Some(tx) => {
+                tx.try_send(buf[0..len].to_vec())
             }
-        } else {
-            println!(
-                "Warning: Unknown host {:?} - {} bytes received from",
-                addr, len
-            );
-            return Ok(());
-        }
+        };
+        if let Err(e) = res {
+            eprintln!("Warning: SNMP error pass response to {}: {}", addr, e);
+            if self.clear_closed_sessions().await<1 {
+                //stop receive task
+                return Err(std::io::Error::new(std::io::ErrorKind::Other, e));
+            }
+        };
+        return Ok(());
     }
 }
 #[derive(Clone)]
