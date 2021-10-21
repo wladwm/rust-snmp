@@ -269,8 +269,10 @@ impl SNMPSocketInner {
             sessions: Arc::new(RwLock::new(BTreeMap::new())),
         }
     }
-    async fn clear_closed_sessions(&self) {
-        self.sessions.write().await.retain(|_k, v| !v.is_closed())
+    async fn clear_closed_sessions(&self) -> usize {
+        let mut grd=self.sessions.write().await;
+        grd.retain(|_k, v| !v.is_closed());
+        grd.len()
     }
     async fn run(&self) {
         self.clear_closed_sessions().await;
@@ -290,10 +292,8 @@ impl SNMPSocketInner {
         if let Some(tx) = self.sessions.read().await.get(&addr) {
             if let Err(e) = tx.try_send(buf[0..len].to_vec()) {
                 eprintln!("Warning: SNMP error pass response to {}: {}", addr, e);
-                self.clear_closed_sessions().await;
-                let mut grd=self.sessions.write().await;
-                drop(grd.remove(&addr));
-                if grd.len()<1 {
+                if self.clear_closed_sessions().await<1 {
+                    //stop receive task
                     return Err(std::io::Error::new(std::io::ErrorKind::Other, e));
                 }
                 return Ok(());
