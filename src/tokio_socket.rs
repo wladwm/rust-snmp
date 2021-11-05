@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use tokio::net::{lookup_host, ToSocketAddrs, UdpSocket};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
-use tokio::sync::{RwLock,Mutex};
+use tokio::sync::{Mutex, RwLock};
 use tokio::time::{self, Duration};
 const BUFFER_SIZE: usize = 4096;
 
@@ -56,7 +56,7 @@ impl SNMPSession {
         &self.community
     }
     pub fn set_snmp_community(&mut self, community: &[u8]) -> SnmpResult<()> {
-        if community.len() < 1 {
+        if community.is_empty() {
             return Err(SnmpError::CommunityMismatch);
         }
         self.community.resize(community.len(), 0);
@@ -67,26 +67,22 @@ impl SNMPSession {
     async fn send_and_recv(&mut self) -> SnmpResult<usize> {
         let _sent_bytes = match self.socket.send_to(&self.send_pdu[..], self.host).await {
             Err(e) => {
-                return Err(SnmpError::SendError(format!("{}", e).to_string()));
+                return Err(SnmpError::SendError(format!("{}", e)));
             }
             Ok(sendres) => sendres,
         };
         match self.rx.recv().await {
-            None => {
-                return Err(SnmpError::ReceiveError("Received None".to_string()));
-            }
+            None => Err(SnmpError::ReceiveError("Received None".to_string())),
             Some(pdubuf) => {
                 self.recv_buf.resize(pdubuf.len(), 0);
                 self.recv_buf.copy_from_slice(&pdubuf[..]);
-                return Ok(pdubuf.len());
+                Ok(pdubuf.len())
             }
         }
     }
     async fn send_and_recv_timeout(&mut self, timeout: Duration) -> SnmpResult<usize> {
         match time::timeout(timeout, self.send_and_recv()).await {
-            Err(_) => {
-                return Err(SnmpError::Timeout);
-            }
+            Err(_) => Err(SnmpError::Timeout),
             Ok(resio) => resio,
         }
     }
@@ -270,7 +266,7 @@ impl SNMPSocketInner {
         }
     }
     async fn clear_closed_sessions(&self) -> usize {
-        let mut grd=self.sessions.write().await;
+        let mut grd = self.sessions.write().await;
         grd.retain(|_k, v| !v.is_closed());
         grd.len()
     }
@@ -280,9 +276,8 @@ impl SNMPSocketInner {
         buf.resize(BUFFER_SIZE, 0);
         let mbuf = buf.as_mut_slice();
         loop {
-            match self.recv_one(mbuf).await {
-                Err(_) => break,
-                Ok(_) => {}
+            if self.recv_one(mbuf).await.is_err() {
+                break;
             }
         }
         self.clear_closed_sessions().await;
@@ -296,19 +291,17 @@ impl SNMPSocketInner {
                     addr, len
                 );
                 return Ok(());
-            },
-            Some(tx) => {
-                tx.try_send(buf[0..len].to_vec())
             }
+            Some(tx) => tx.try_send(buf[0..len].to_vec()),
         };
         if let Err(e) = res {
             eprintln!("Warning: SNMP error pass response to {}: {}", addr, e);
-            if self.clear_closed_sessions().await<1 {
+            if self.clear_closed_sessions().await < 1 {
                 //stop receive task
                 return Err(std::io::Error::new(std::io::ErrorKind::Other, e));
             }
         };
-        return Ok(());
+        Ok(())
     }
 }
 #[derive(Clone)]
@@ -321,13 +314,13 @@ impl SNMPSocket {
     pub async fn new() -> std::io::Result<Self> {
         Ok(Self {
             inner: SNMPSocketInner::new().await?,
-            recv_task: Arc::new(Mutex::new(None))
+            recv_task: Arc::new(Mutex::new(None)),
         })
     }
     pub fn from_socket(socket: UdpSocket) -> Self {
         Self {
             inner: SNMPSocketInner::from_socket(socket),
-            recv_task: Arc::new(Mutex::new(None))
+            recv_task: Arc::new(Mutex::new(None)),
         }
     }
     pub async fn session<SA: ToSocketAddrs>(
@@ -337,10 +330,11 @@ impl SNMPSocket {
         starting_req_id: i32,
         version: i32,
     ) -> std::io::Result<SNMPSession> {
-        let la=self.inner.socket.local_addr()?;
-        let socketaddr = match lookup_host(&hostaddr).await?.find(|a|{
-            (a.is_ipv4() && la.is_ipv4()) || (a.is_ipv6() && la.is_ipv6())
-        }) {
+        let la = self.inner.socket.local_addr()?;
+        let socketaddr = match lookup_host(&hostaddr)
+            .await?
+            .find(|a| (a.is_ipv4() && la.is_ipv4()) || (a.is_ipv6() && la.is_ipv6()))
+        {
             None => {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::AddrNotAvailable,
@@ -358,14 +352,13 @@ impl SNMPSocket {
             }
         }
         let (tx, rx) = channel(100);
-        self.inner.sessions.write().await.insert(socketaddr.clone(), tx);
+        self.inner.sessions.write().await.insert(socketaddr, tx);
         {
-            let mut rt_g=self.recv_task.lock().await;
+            let mut rt_g = self.recv_task.lock().await;
             let inner = self.inner.clone();
             if rt_g.is_none() {
-                *rt_g=Some(tokio::spawn(async move {
+                *rt_g = Some(tokio::spawn(async move {
                     inner.run().await;
-                    ()
                 }));
             }
         }

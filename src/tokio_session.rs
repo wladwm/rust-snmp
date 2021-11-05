@@ -45,7 +45,7 @@ impl TokioSession {
 
         socket.connect(destination).await?;
         Ok(Self {
-            socket: socket,
+            socket,
             community: community.to_vec(),
             req_id: Wrapping(starting_req_id),
             send_pdu: pdu::Buf::default(),
@@ -74,7 +74,7 @@ impl TokioSession {
         &self.community
     }
     pub fn set_snmp_community(&mut self, community: &[u8]) -> SnmpResult<()> {
-        if community.len() < 1 {
+        if community.is_empty() {
             return Err(SnmpError::CommunityMismatch);
         }
         self.community.resize(community.len(), 0);
@@ -90,9 +90,9 @@ impl TokioSession {
         match socket.send(&pdu[..]).await {
             Ok(_pdu_len) => match socket.recv(out).await {
                 Ok(len) => Ok(len),
-                Err(e) => Err(SnmpError::ReceiveError(format!("{}", e).to_string())),
+                Err(e) => Err(SnmpError::ReceiveError(format!("{}", e))),
             },
-            Err(e) => Err(SnmpError::SendError(format!("{}", e).to_string())),
+            Err(e) => Err(SnmpError::SendError(format!("{}", e))),
         }
     }
 
@@ -114,7 +114,7 @@ impl TokioSession {
             }
         }
         match time::timeout(timeout, Self::send_and_recv(socket, pdu, out)).await {
-            Err(_) => return Err(SnmpError::Timeout),
+            Err(_) => Err(SnmpError::Timeout),
             Ok(result) => result,
         }
     }
