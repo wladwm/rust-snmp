@@ -1,16 +1,10 @@
+use crate::{
+    asn1, get_oid_array, pdu, AsnReader, ObjectIdentifier, SnmpError, SnmpMessageType, SnmpResult,
+    Value, Varbinds,
+};
+use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::num::Wrapping;
-// use std::time::Duration;
-// use tokio::prelude::*;
-use crate::get_oid_array;
-use crate::pdu;
-use crate::SnmpError;
-use crate::SnmpMessageType;
-use crate::SnmpPdu;
-use crate::SnmpResult;
-use crate::Value;
-use std::collections::BTreeMap;
-//use std::net::IpAddr;
 use std::sync::Arc;
 use tokio::net::{lookup_host, ToSocketAddrs, UdpSocket};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
@@ -18,6 +12,65 @@ use tokio::sync::{Mutex, RwLock};
 use tokio::time::{self, Duration};
 const BUFFER_SIZE: usize = 4096;
 
+#[derive(Debug,Clone)]
+pub struct SNMPResponse {
+    pub varbind_bytes: Vec<u8>,
+    pub version: i64,
+    pub community: Vec<u8>,
+    pub message_type: SnmpMessageType,
+    pub req_id: i32,
+    pub error_status: u32,
+    pub error_index: u32,
+    //pub varbinds: crate::Varbinds<'a>,
+}
+impl SNMPResponse {
+    pub fn from_vec(bytes: Vec<u8>) -> SnmpResult<SNMPResponse> {
+        let seq = AsnReader::from_bytes(&bytes).read_raw(asn1::TYPE_SEQUENCE)?;
+        let mut rdr = AsnReader::from_bytes(seq);
+        let version = rdr.read_asn_integer()?;
+        if version > 1 || version < 0 {
+            return Err(SnmpError::UnsupportedVersion);
+        }
+        let community = rdr.read_asn_octetstring()?.to_vec();
+        let ident = rdr.peek_byte()?;
+        let message_type = SnmpMessageType::from_ident(ident)?;
+
+        let mut response_pdu = AsnReader::from_bytes(rdr.read_raw(ident)?);
+
+        let req_id = response_pdu.read_asn_integer()?;
+        if req_id < i32::min_value() as i64 || req_id > i32::max_value() as i64 {
+            return Err(SnmpError::ValueOutOfRange);
+        }
+
+        let error_status = response_pdu.read_asn_integer()?;
+        if error_status < 0 || error_status > i32::max_value() as i64 {
+            return Err(SnmpError::ValueOutOfRange);
+        }
+
+        let error_index = response_pdu.read_asn_integer()?;
+        if error_index < 0 || error_index > i32::max_value() as i64 {
+            return Err(SnmpError::ValueOutOfRange);
+        }
+
+        let varbind_bytes = response_pdu.read_raw(asn1::TYPE_SEQUENCE)?.to_vec();
+        //let varbinds = Varbinds::from_bytes(varbind_bytes);
+        Ok(SNMPResponse {
+            varbind_bytes,
+            version,
+            community,
+            message_type,
+            req_id: req_id as i32,
+            error_status: error_status as u32,
+            error_index: error_index as u32,
+        })
+    }
+    pub fn varbinds(&self) -> Varbinds<'_> {
+        Varbinds::from_bytes(&self.varbind_bytes)
+    }
+    pub fn get_varbind(&self, oid: &[u32]) -> Option<(ObjectIdentifier<'_>, Value<'_>)> {
+        Varbinds::from_bytes(&self.varbind_bytes).find(|v| v.0.eq(oid))
+    }
+}
 pub struct SNMPSession {
     socket: Arc<UdpSocket>,
     community: Vec<u8>,
@@ -26,7 +79,6 @@ pub struct SNMPSession {
     pub host: SocketAddr,
     rx: Receiver<Vec<u8>>,
     send_pdu: pdu::Buf,
-    recv_buf: Vec<u8>,
 }
 impl SNMPSession {
     pub fn host(&self) -> &SocketAddr {
@@ -64,7 +116,7 @@ impl SNMPSession {
         Ok(())
     }
 
-    async fn send_and_recv(&mut self) -> SnmpResult<usize> {
+    async fn send_and_recv(&mut self) -> SnmpResult<SNMPResponse> {
         let _sent_bytes = match self.socket.send_to(&self.send_pdu[..], self.host).await {
             Err(e) => {
                 return Err(SnmpError::SendError(format!("{}", e)));
@@ -73,20 +125,20 @@ impl SNMPSession {
         };
         match self.rx.recv().await {
             None => Err(SnmpError::ReceiveError("Received None".to_string())),
-            Some(pdubuf) => {
-                self.recv_buf.resize(pdubuf.len(), 0);
-                self.recv_buf.copy_from_slice(&pdubuf[..]);
-                Ok(pdubuf.len())
-            }
+            Some(pdubuf) => Ok(SNMPResponse::from_vec(pdubuf)?),
         }
     }
-    async fn send_and_recv_timeout(&mut self, timeout: Duration) -> SnmpResult<usize> {
+    async fn send_and_recv_timeout(&mut self, timeout: Duration) -> SnmpResult<SNMPResponse> {
         match time::timeout(timeout, self.send_and_recv()).await {
             Err(_) => Err(SnmpError::Timeout),
             Ok(resio) => resio,
         }
     }
-    async fn send_and_recv_repeat(&mut self, repeat: u32, timeout: Duration) -> SnmpResult<usize> {
+    async fn send_and_recv_repeat(
+        &mut self,
+        repeat: u32,
+        timeout: Duration,
+    ) -> SnmpResult<SNMPResponse> {
         for _ in 1..repeat {
             match self.send_and_recv_timeout(timeout).await {
                 Err(e) => match e {
@@ -98,61 +150,50 @@ impl SNMPSession {
         }
         self.send_and_recv_timeout(timeout).await
     }
+    async fn send_and_get(&mut self, repeat: u32, timeout: Duration) -> SnmpResult<SNMPResponse> {
+        let req_id = self.req_id.0;
+        let rpdu = self.send_and_recv_repeat(repeat, timeout).await?;
+        self.req_id += Wrapping(1);
+        if rpdu.message_type != SnmpMessageType::Response {
+            return Err(SnmpError::AsnWrongType);
+        }
+        if rpdu.req_id != req_id {
+            return Err(SnmpError::RequestIdMismatch);
+        }
+        if rpdu.community != &self.community[..] {
+            return Err(SnmpError::CommunityMismatch);
+        }
+        Ok(rpdu)
+    }
     pub async fn get(
         &mut self,
         name: &[u32],
         repeat: u32,
         timeout: Duration,
-    ) -> SnmpResult<SnmpPdu<'_>> {
-        let req_id = self.req_id.0;
+    ) -> SnmpResult<SNMPResponse> {
         pdu::build_get(
             self.community.as_slice(),
-            req_id,
+            self.req_id.0,
             name,
             &mut self.send_pdu,
             self.version,
         );
-        self.send_and_recv_repeat(repeat, timeout).await?;
-        self.req_id += Wrapping(1);
-        let resp = SnmpPdu::from_bytes(&self.recv_buf[..])?;
-        if resp.message_type != SnmpMessageType::Response {
-            return Err(SnmpError::AsnWrongType);
-        }
-        if resp.req_id != req_id {
-            return Err(SnmpError::RequestIdMismatch);
-        }
-        if resp.community != &self.community[..] {
-            return Err(SnmpError::CommunityMismatch);
-        }
-        Ok(resp)
+        self.send_and_get(repeat, timeout).await
     }
     pub async fn getnext(
         &mut self,
         name: &[u32],
         repeat: u32,
         timeout: Duration,
-    ) -> SnmpResult<SnmpPdu<'_>> {
-        let req_id = self.req_id.0;
+    ) -> SnmpResult<SNMPResponse> {
         pdu::build_getnext(
             self.community.as_slice(),
-            req_id,
+            self.req_id.0,
             name,
             &mut self.send_pdu,
             self.version,
         );
-        self.send_and_recv_repeat(repeat, timeout).await?;
-        self.req_id += Wrapping(1);
-        let resp = SnmpPdu::from_bytes(&self.recv_buf[..])?;
-        if resp.message_type != SnmpMessageType::Response {
-            return Err(SnmpError::AsnWrongType);
-        }
-        if resp.req_id != req_id {
-            return Err(SnmpError::RequestIdMismatch);
-        }
-        if resp.community != &self.community[..] {
-            return Err(SnmpError::CommunityMismatch);
-        }
-        Ok(resp)
+        self.send_and_get(repeat, timeout).await
     }
 
     pub async fn getbulk(
@@ -162,29 +203,16 @@ impl SNMPSession {
         max_repetitions: u32,
         repeat: u32,
         timeout: Duration,
-    ) -> SnmpResult<SnmpPdu<'_>> {
-        let req_id = self.req_id.0;
+    ) -> SnmpResult<SNMPResponse> {
         pdu::build_getbulk(
             self.community.as_slice(),
-            req_id,
+            self.req_id.0,
             names,
             non_repeaters,
             max_repetitions,
             &mut self.send_pdu,
         );
-        self.send_and_recv_repeat(repeat, timeout).await?;
-        self.req_id += Wrapping(1);
-        let resp = SnmpPdu::from_bytes(&self.recv_buf[..])?;
-        if resp.message_type != SnmpMessageType::Response {
-            return Err(SnmpError::AsnWrongType);
-        }
-        if resp.req_id != req_id {
-            return Err(SnmpError::RequestIdMismatch);
-        }
-        if resp.community != &self.community[..] {
-            return Err(SnmpError::CommunityMismatch);
-        }
-        Ok(resp)
+        self.send_and_get(repeat, timeout).await
     }
 
     /// # Panics if any of the values are not one of these supported types:
@@ -204,35 +232,22 @@ impl SNMPSession {
         values: &[(&[u32], Value<'_>)],
         repeat: u32,
         timeout: Duration,
-    ) -> SnmpResult<SnmpPdu<'_>> {
-        let req_id = self.req_id.0;
+    ) -> SnmpResult<SNMPResponse> {
         pdu::build_set(
             self.community.as_slice(),
-            req_id,
+            self.req_id.0,
             values,
             &mut self.send_pdu,
             self.version,
         );
-        self.send_and_recv_repeat(repeat, timeout).await?;
-        self.req_id += Wrapping(1);
-        let resp = SnmpPdu::from_bytes(&self.recv_buf[..])?;
-        if resp.message_type != SnmpMessageType::Response {
-            return Err(SnmpError::AsnWrongType);
-        }
-        if resp.req_id != req_id {
-            return Err(SnmpError::RequestIdMismatch);
-        }
-        if resp.community != &self.community[..] {
-            return Err(SnmpError::CommunityMismatch);
-        }
-        Ok(resp)
+        self.send_and_get(repeat, timeout).await
     }
     pub async fn get_oid(
         &mut self,
         oid: &str,
         repeat: u32,
         timeout: Duration,
-    ) -> SnmpResult<SnmpPdu<'_>> {
+    ) -> SnmpResult<SNMPResponse> {
         self.get(get_oid_array(oid).as_slice(), repeat, timeout)
             .await
     }
@@ -241,7 +256,7 @@ impl SNMPSession {
         oid: &str,
         repeat: u32,
         timeout: Duration,
-    ) -> SnmpResult<SnmpPdu<'_>> {
+    ) -> SnmpResult<SNMPResponse> {
         self.getnext(get_oid_array(oid).as_slice(), repeat, timeout)
             .await
     }
@@ -370,7 +385,6 @@ impl SNMPSocket {
             host: socketaddr,
             rx,
             send_pdu: pdu::Buf::default(),
-            recv_buf: Vec::new(),
         })
     }
 }

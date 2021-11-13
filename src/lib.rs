@@ -108,6 +108,8 @@ use std::time::Duration;
 
 pub mod tokio_session;
 pub mod tokio_socket;
+#[cfg(feature = "stream")]
+pub mod tokio_socket_utils;
 
 #[cfg(target_pointer_width = "32")]
 const USIZE_LEN: usize = 4;
@@ -134,6 +136,7 @@ pub enum SnmpError {
     SendError(String),
     ReceiveError(String),
     Timeout,
+    OidIsNotIncreasing
 }
 impl fmt::Display for SnmpError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -151,6 +154,7 @@ impl fmt::Display for SnmpError {
             SnmpError::SendError(s) => write!(f, "Snmp PDU Send Error({})", s),
             SnmpError::ReceiveError(s) => write!(f, "Snmp Receive Error({})", s),
             SnmpError::Timeout => write!(f, "Timeout"),
+            SnmpError::OidIsNotIncreasing => write!(f, "OID is not increasing"),
         }
     }
 }
@@ -171,6 +175,7 @@ impl std::error::Error for SnmpError {
             SnmpError::SendError(_) => "Snmp PDU Send Error",
             SnmpError::ReceiveError(_) => "Snmp Receive Error",
             SnmpError::Timeout => "Timeout",
+            SnmpError::OidIsNotIncreasing => "OID is not increasing",
         }
     }
     fn cause(&self) -> Option<&dyn std::error::Error> {
@@ -927,11 +932,15 @@ impl<'a> ObjectIdentifier<'a> {
 #[derive(Serialize, Deserialize, Copy)]
 pub struct AsnReader<'a> {
     inner: &'a [u8],
+    pos: usize,
 }
 
 impl<'a> Clone for AsnReader<'a> {
     fn clone(&self) -> AsnReader<'a> {
-        AsnReader { inner: self.inner }
+        AsnReader {
+            inner: self.inner,
+            pos: self.pos,
+        }
     }
 }
 
@@ -943,10 +952,29 @@ impl<'a> fmt::Debug for AsnReader<'a> {
 
 impl<'a> AsnReader<'a> {
     pub fn from_bytes(bytes: &[u8]) -> AsnReader {
-        AsnReader { inner: bytes }
+        AsnReader {
+            inner: bytes,
+            pos: 0,
+        }
     }
 
-    pub fn peek_byte(&mut self) -> SnmpResult<u8> {
+    pub fn pos(&self) -> usize {
+        self.pos
+    }
+
+    pub fn advance(&mut self, mut offset: usize) {
+        if offset < 1 {
+            return;
+        }
+        if offset >= self.inner.len() {
+            offset = self.inner.len()
+        }
+        let (_, remaining) = self.inner.split_at(offset);
+        self.pos += offset;
+        self.inner = remaining;
+    }
+
+    pub fn peek_byte(&self) -> SnmpResult<u8> {
         if self.inner.is_empty() {
             Err(SnmpError::AsnEof)
         } else {
@@ -958,6 +986,7 @@ impl<'a> AsnReader<'a> {
         match self.inner.split_first() {
             Some((head, tail)) => {
                 self.inner = tail;
+                self.pos += 1;
                 Ok(*head)
             }
             _ => Err(SnmpError::AsnEof),
@@ -971,6 +1000,7 @@ impl<'a> AsnReader<'a> {
                 // short form
                 o = *head as usize;
                 self.inner = tail;
+                self.pos += 1;
                 Ok(o)
             } else if head == &0xff {
                 Err(SnmpError::AsnInvalidLen) // reserved for future use
@@ -986,6 +1016,7 @@ impl<'a> AsnReader<'a> {
                 bytes[(USIZE_LEN - length_len)..].copy_from_slice(&tail[..length_len]);
 
                 o = unsafe { mem::transmute::<[u8; USIZE_LEN], usize>(bytes).to_be() };
+                self.pos += length_len;
                 self.inner = &tail[length_len as usize..];
                 Ok(o)
             }
@@ -1005,6 +1036,7 @@ impl<'a> AsnReader<'a> {
         }
         let (val, remaining) = self.inner.split_at(val_len);
         self.inner = remaining;
+        self.pos += val_len;
         decode_i64(val)
     }
 
@@ -1019,6 +1051,7 @@ impl<'a> AsnReader<'a> {
         }
         let (val, remaining) = self.inner.split_at(val_len);
         self.inner = remaining;
+        self.pos += val_len;
         Ok(val)
     }
 
@@ -1037,6 +1070,7 @@ impl<'a> AsnReader<'a> {
         let (seq_bytes, remaining) = self.inner.split_at(seq_len);
         let mut reader = AsnReader::from_bytes(seq_bytes);
         self.inner = remaining;
+        self.pos += seq_len;
         f(&mut reader)
     }
 
@@ -1092,6 +1126,7 @@ impl<'a> AsnReader<'a> {
         }
         let (input, remaining) = self.inner.split_at(val_len);
         self.inner = remaining;
+        self.pos += val_len;
 
         Ok(ObjectIdentifier::from_bytes(input))
     }
@@ -1241,6 +1276,78 @@ impl<'a> Value<'a> {
             snmp::TYPE_OPAQUE => Value::Opaque(value.as_bytes()),
             snmp::TYPE_COUNTER64 => Value::Counter64(value.parse::<u64>().unwrap()),
             _ => Value::Integer(value.parse::<i64>().unwrap()),
+        }
+    }
+    pub fn get_string(&self) -> Option<String> {
+        match self {
+            Value::OctetString(u) => return Some(String::from_utf8_lossy(u).to_string()),
+            _ => return Some(format!("{}",self)),
+        }
+    }
+    pub fn get_u64(&self) -> Option<u64> {
+        match self {
+            Value::Boolean(b) => {
+                if *b {
+                    return Some(1);
+                } else {
+                    return Some(0);
+                }
+            }
+            Value::Null => return None,
+            Value::Integer(i) => return Some(*i as u64),
+            Value::Counter32(u) => return Some(*u as u64),
+            Value::Unsigned32(u) => return Some(*u as u64),
+            Value::Timeticks(u) => return Some(*u as u64),
+            Value::Counter64(u) => return Some(*u as u64),
+            _ => return None,
+        }
+    }
+    pub fn get_u32(&self) -> Option<u32> {
+        match self {
+            Value::Boolean(b) => {
+                if *b {
+                    return Some(1);
+                } else {
+                    return Some(0);
+                }
+            }
+            Value::Null => return None,
+            Value::Integer(i) => return Some(*i as u32),
+            Value::Counter32(u) => return Some(*u as u32),
+            Value::Unsigned32(u) => return Some(*u as u32),
+            Value::Timeticks(u) => return Some(*u as u32),
+            Value::Counter64(u) => return Some(*u as u32),
+            _ => return None,
+        }
+    }
+    pub fn get_u8(&self) -> Option<u8> {
+        match self {
+            Value::Boolean(b) => {
+                if *b {
+                    return Some(1);
+                } else {
+                    return Some(0);
+                }
+            }
+            Value::Null => return None,
+            Value::Integer(i) => return Some(*i as u8),
+            Value::Counter32(u) => return Some(*u as u8),
+            Value::Unsigned32(u) => return Some(*u as u8),
+            Value::Timeticks(u) => return Some(*u as u8),
+            Value::Counter64(u) => return Some(*u as u8),
+            _ => return None,
+        }
+    }
+    pub fn get_oid(&self) -> Option<Vec<u32>> {
+        match self {
+            Value::ObjectIdentifier(u) => {
+                let mut oid: ObjIdBuf = [0u32; 128];
+                match u.read_name(&mut oid) {
+                    Ok(v) => Some(v.to_vec()),
+                    Err(_) => None,
+                }
+            }
+            _ => None,
         }
     }
 }
@@ -1625,7 +1732,7 @@ impl<'a> SnmpPdu<'a> {
     }
 }
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum SnmpMessageType {
     GetRequest,
     GetNextRequest,
@@ -1675,6 +1782,13 @@ impl<'a> Varbinds<'a> {
         Varbinds {
             inner: AsnReader::from_bytes(bytes),
         }
+    }
+    pub fn pos(&self) -> usize {
+        self.inner.pos()
+    }
+
+    pub fn advance(&mut self, offset: usize) {
+        self.inner.advance(offset)
     }
 }
 
