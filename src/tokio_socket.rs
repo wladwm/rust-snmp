@@ -369,11 +369,13 @@ impl SNMPSocket {
         let (tx, rx) = channel(100);
         self.inner.sessions.write().await.insert(socketaddr, tx);
         {
+            let recv_task = self.recv_task.clone();
             let mut rt_g = self.recv_task.lock().await;
             let inner = self.inner.clone();
             if rt_g.is_none() {
                 *rt_g = Some(tokio::spawn(async move {
                     inner.run().await;
+                    recv_task.lock().await.take();
                 }));
             }
         }
