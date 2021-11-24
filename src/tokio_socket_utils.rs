@@ -125,13 +125,18 @@ where
                             let mut oidname: ObjIdBuf = [0u32; 128];
                             let nm = match q.0.read_name(&mut oidname) {
                                 Ok(n) => n,
-                                Err(_) => continue,
+                                Err(e) => {
+                                    warn!("SnmpWalk read_name error {}",e);
+                                    continue
+                                },
                             };
                             let walkoid = self.inner.as_ref().unwrap().walkoid;
                             if nm.len() < walkoid.len() {
+                                trace!("SnmpWalk name len {}<{}",nm.len(),walkoid.len());
                                 return Poll::Ready(None);
                             }
                             if !nm[0..walkoid.len()].eq(walkoid) {
+                                trace!("SnmpWalk name {:?} does not match {:?}",nm,walkoid);
                                 return Poll::Ready(None);
                             }
                             Some(((self.func)(q.0, q.1), nm.to_vec(), vars.pos()))
@@ -175,16 +180,16 @@ where
                 Err(e) => return Poll::Ready(Some(Err(e))), //invalid response
             };
             if nm.len() < r.1.walkoid.len() {
-                //warn!("Response {:?} OID is too short", fv);
+                trace!("SnmpWalk name len {}<{}",nm.len(),r.1.walkoid.len());
                 return Poll::Ready(None);
             }
             if nm.eq(r.1.walkoid) {
-                //warn!("Response {:?} OID is not increasing", fv);
+                warn!("SnmpWalk response {:?} OID is not increasing", fv);
                 return Poll::Ready(Some(Err(SnmpError::OidIsNotIncreasing)));
             };
             if !r.1.walkoid.eq(&nm[0..r.1.walkoid.len()]) {
                 // walk finished
-                //debug!("Response {:?} walk finished for {:?}",fv,r.1.walkoid);
+                trace!("Response {:?} walk finished for {:?}",fv,r.1.walkoid);
                 return Poll::Ready(None);
             }
             self.rsp = Some(r.0);

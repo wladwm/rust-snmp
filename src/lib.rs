@@ -95,6 +95,8 @@
 // #![cfg_attr(feature = "private-tests", feature(test))]
 // #![allow(unknown_lints, doc_markdown)]
 extern crate serde;
+#[macro_use]
+extern crate log;
 // use std::num::ParseIntError;
 use std::fmt;
 // use std::str::FromStr;

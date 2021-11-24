@@ -21,3 +21,4 @@ tokio-util = { version = "0.6.8", features = [ "codec" ] }
 serde = { version = "1.0.130", features = ["derive"] }
 futures = { version="0", optional = true }
 futures-util = { version="0", optional = true }
+log = "0"

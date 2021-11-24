@@ -286,6 +286,7 @@ impl SNMPSocketInner {
         grd.len()
     }
     async fn run(&self) {
+        trace!("receive task started");
         self.clear_closed_sessions().await;
         let mut buf = Vec::<u8>::new();
         buf.resize(BUFFER_SIZE, 0);
@@ -296,13 +297,14 @@ impl SNMPSocketInner {
             }
         }
         self.clear_closed_sessions().await;
+        trace!("receive task finished");
     }
     async fn recv_one(&self, buf: &mut [u8]) -> std::io::Result<()> {
         let (len, addr) = self.socket.recv_from(buf).await?;
         let res = match self.sessions.read().await.get(&addr) {
             None => {
-                println!(
-                    "Warning: Unknown host {:?} - {} bytes received from",
+                warn!(
+                    "Unknown host {:?} - {} bytes received from",
                     addr, len
                 );
                 return Ok(());
@@ -310,9 +312,10 @@ impl SNMPSocketInner {
             Some(tx) => tx.try_send(buf[0..len].to_vec()),
         };
         if let Err(e) = res {
-            eprintln!("Warning: SNMP error pass response to {}: {}", addr, e);
+            warn!("Warning: SNMP error pass response to {}: {}", addr, e);
             if self.clear_closed_sessions().await < 1 {
                 //stop receive task
+                trace!("No more sessions, closing receive task");
                 return Err(std::io::Error::new(std::io::ErrorKind::Other, e));
             }
         };
