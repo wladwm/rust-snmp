@@ -143,6 +143,7 @@ impl SNMPSession {
             match self.send_and_recv_timeout(timeout).await {
                 Err(e) => match e {
                     SnmpError::Timeout => continue,
+                    SnmpError::RequestIdMismatch => continue,//late reply
                     other => return Err(other),
                 },
                 Ok(result) => return Ok(result),
