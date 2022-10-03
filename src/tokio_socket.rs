@@ -6,13 +6,14 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::num::Wrapping;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::net::{lookup_host, ToSocketAddrs, UdpSocket};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::sync::{Mutex, RwLock};
 use tokio::time::{self, Duration};
 const BUFFER_SIZE: usize = 4096;
 
-#[derive(Debug,Clone)]
+#[derive(Debug, Clone)]
 pub struct SNMPResponse {
     pub varbind_bytes: Vec<u8>,
     pub version: i64,
@@ -71,8 +72,96 @@ impl SNMPResponse {
         Varbinds::from_bytes(&self.varbind_bytes).find(|v| v.0.eq(oid))
     }
 }
-pub struct SNMPSession {
+struct LimitBasket {
+    last: Option<Instant>,
+    cnt: usize,
+    limit_pps: usize,
+    minwait_time: Duration,
+}
+impl LimitBasket {
+    fn new(limit_pps: usize) -> LimitBasket {
+        LimitBasket {
+            last: None,
+            cnt: 0,
+            limit_pps,
+            minwait_time: Duration::from_millis(1),
+        }
+    }
+    fn set_limit(&mut self, limit_pps: usize) {
+        self.limit_pps = limit_pps;
+    }
+    async fn shot(&mut self) {
+        if self.limit_pps==0 {
+            return
+        }
+        let mut nw = Instant::now();
+        match self.last {
+            None => {
+                self.last = Some(nw);
+                self.cnt = 1;
+                return;
+            }
+            Some(l) => {
+                let elapsed = (nw - l).as_secs_f64();
+                let mut sub_pps = ((self.limit_pps as f64) * elapsed).trunc();
+                if sub_pps < 0f64 {
+                    sub_pps = 0f64;
+                }
+                let sub_pps = sub_pps as usize;
+                if self.cnt <= sub_pps {
+                    self.cnt = 0;
+                } else {
+                    self.cnt -= sub_pps;
+                }
+                if self.cnt > 0 {
+                    let wd = Duration::from_secs_f64((self.cnt as f64) / (self.limit_pps as f64));
+                    if wd >= self.minwait_time {
+                        tokio::time::sleep(wd).await;
+                        self.cnt = 0;
+                        nw = Instant::now();
+                    }
+                }
+                self.cnt += 1;
+                self.last = Some(nw);
+            }
+        }
+    }
+}
+#[derive(Clone)]
+struct SocketLimit {
     socket: Arc<UdpSocket>,
+    send_limit: Arc<Mutex<LimitBasket>>,
+}
+impl SocketLimit {
+    pub fn new(socket:UdpSocket) -> SocketLimit {
+        SocketLimit {
+            socket: Arc::new(socket),
+            send_limit: Arc::new(Mutex::new(LimitBasket::new(0)))
+        }
+    }
+    pub async fn set_send_limit(&self, limit_pps: usize) {
+        self.send_limit.lock().await.set_limit(limit_pps);
+    }
+    pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
+        self.socket.local_addr()
+    }
+    pub async fn recv_from(&self, buf: &mut [u8]) -> std::io::Result<(usize, SocketAddr)> {
+        self.socket.recv_from(buf).await
+    }
+    pub async fn send_to<A: ToSocketAddrs>(
+        &self,
+        buf: &[u8],
+        target: A
+    ) -> std::io::Result<usize> {
+        {
+            let mut limit_guard = self.send_limit.lock().await;
+            limit_guard.shot().await;
+        };
+        self.socket.send_to(buf,target).await
+    }
+}
+pub struct SNMPSession {
+    socket: SocketLimit,
     community: Vec<u8>,
     req_id: Wrapping<i32>,
     version: i32,
@@ -115,7 +204,9 @@ impl SNMPSession {
         self.community.as_mut_slice().copy_from_slice(community);
         Ok(())
     }
-
+    pub async fn set_send_limit(&self, limit_pps: usize) {
+        self.socket.set_send_limit(limit_pps).await;
+    }
     async fn send_and_recv(&mut self) -> SnmpResult<SNMPResponse> {
         let _sent_bytes = match self.socket.send_to(&self.send_pdu[..], self.host).await {
             Err(e) => {
@@ -143,7 +234,7 @@ impl SNMPSession {
             match self.send_and_recv_timeout(timeout).await {
                 Err(e) => match e {
                     SnmpError::Timeout => continue,
-                    SnmpError::RequestIdMismatch => continue,//late reply
+                    SnmpError::RequestIdMismatch => continue, //late reply
                     other => return Err(other),
                 },
                 Ok(result) => return Ok(result),
@@ -264,20 +355,20 @@ impl SNMPSession {
 }
 #[derive(Clone)]
 struct SNMPSocketInner {
-    socket: Arc<UdpSocket>,
+    socket: SocketLimit,
     sessions: Arc<RwLock<BTreeMap<SocketAddr, Sender<Vec<u8>>>>>,
 }
 impl SNMPSocketInner {
     async fn new() -> std::io::Result<Self> {
         let socket = UdpSocket::bind((std::net::Ipv4Addr::new(0, 0, 0, 0), 0)).await?;
         Ok(Self {
-            socket: Arc::new(socket),
+            socket: SocketLimit::new(socket),
             sessions: Arc::new(RwLock::new(BTreeMap::new())),
         })
     }
     fn from_socket(socket: UdpSocket) -> Self {
         Self {
-            socket: Arc::new(socket),
+            socket: SocketLimit::new(socket),
             sessions: Arc::new(RwLock::new(BTreeMap::new())),
         }
     }
@@ -304,10 +395,7 @@ impl SNMPSocketInner {
         let (len, addr) = self.socket.recv_from(buf).await?;
         let res = match self.sessions.read().await.get(&addr) {
             None => {
-                warn!(
-                    "Unknown host {:?} - {} bytes received from",
-                    addr, len
-                );
+                warn!("Unknown host {:?} - {} bytes received from", addr, len);
                 return Ok(());
             }
             Some(tx) => tx.try_send(buf[0..len].to_vec()),
@@ -335,6 +423,9 @@ impl SNMPSocket {
             inner: SNMPSocketInner::new().await?,
             recv_task: Arc::new(Mutex::new(None)),
         })
+    }
+    pub async fn set_send_limit(&self, limit_pps: usize) {
+        self.inner.socket.set_send_limit(limit_pps).await;
     }
     pub fn from_socket(socket: UdpSocket) -> Self {
         Self {
