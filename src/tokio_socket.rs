@@ -91,8 +91,8 @@ impl LimitBasket {
         self.limit_pps = limit_pps;
     }
     async fn shot(&mut self) {
-        if self.limit_pps==0 {
-            return
+        if self.limit_pps == 0 {
+            return;
         }
         let mut nw = Instant::now();
         match self.last {
@@ -114,11 +114,20 @@ impl LimitBasket {
                     self.cnt -= sub_pps;
                 }
                 if self.cnt > 0 {
-                    let wd = Duration::from_secs_f64((self.cnt as f64) / (self.limit_pps as f64));
+                    let wd = Duration::from_secs_f64(
+                        (self.cnt as f64) / (self.limit_pps as f64) / 10f64,
+                    );
                     if wd >= self.minwait_time {
                         tokio::time::sleep(wd).await;
-                        self.cnt = 0;
-                        nw = Instant::now();
+                        let nw2 = Instant::now();
+                        let spent =
+                            ((nw2 - nw).as_secs_f64() * (self.limit_pps as f64)).trunc() as usize;
+                        if spent >= self.cnt {
+                            self.cnt = 0;
+                        } else {
+                            self.cnt -= spent;
+                        }
+                        nw = nw2;
                     }
                 }
                 self.cnt += 1;
@@ -133,10 +142,10 @@ struct SocketLimit {
     send_limit: Arc<Mutex<LimitBasket>>,
 }
 impl SocketLimit {
-    pub fn new(socket:UdpSocket) -> SocketLimit {
+    pub fn new(socket: UdpSocket) -> SocketLimit {
         SocketLimit {
             socket: Arc::new(socket),
-            send_limit: Arc::new(Mutex::new(LimitBasket::new(0)))
+            send_limit: Arc::new(Mutex::new(LimitBasket::new(0))),
         }
     }
     pub async fn set_send_limit(&self, limit_pps: usize) {
@@ -148,16 +157,12 @@ impl SocketLimit {
     pub async fn recv_from(&self, buf: &mut [u8]) -> std::io::Result<(usize, SocketAddr)> {
         self.socket.recv_from(buf).await
     }
-    pub async fn send_to<A: ToSocketAddrs>(
-        &self,
-        buf: &[u8],
-        target: A
-    ) -> std::io::Result<usize> {
+    pub async fn send_to<A: ToSocketAddrs>(&self, buf: &[u8], target: A) -> std::io::Result<usize> {
         {
             let mut limit_guard = self.send_limit.lock().await;
             limit_guard.shot().await;
         };
-        self.socket.send_to(buf,target).await
+        self.socket.send_to(buf, target).await
     }
 }
 pub struct SNMPSession {
