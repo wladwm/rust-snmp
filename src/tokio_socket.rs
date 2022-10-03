@@ -72,84 +72,83 @@ impl SNMPResponse {
         Varbinds::from_bytes(&self.varbind_bytes).find(|v| v.0.eq(oid))
     }
 }
+
 struct LimitBasket {
-    last: Option<Instant>,
-    cnt: usize,
-    limit_pps: usize,
+    last: Mutex<Instant>,
+    cnt: std::sync::atomic::AtomicUsize,
+    limit_pps: std::sync::atomic::AtomicUsize,
     minwait_time: Duration,
 }
 impl LimitBasket {
     fn new(limit_pps: usize) -> LimitBasket {
         LimitBasket {
-            last: None,
-            cnt: 0,
-            limit_pps,
-            minwait_time: Duration::from_millis(1),
+            last: Mutex::new(Instant::now()),
+            cnt: std::sync::atomic::AtomicUsize::new(0),
+            limit_pps: std::sync::atomic::AtomicUsize::new(limit_pps),
+            minwait_time: Duration::from_millis(10),
         }
     }
-    fn set_limit(&mut self, limit_pps: usize) {
-        self.limit_pps = limit_pps;
+    fn set_limit(&self, limit_pps: usize) {
+        self.limit_pps
+            .store(limit_pps, std::sync::atomic::Ordering::Relaxed);
     }
-    async fn shot(&mut self) {
-        if self.limit_pps == 0 {
+    async fn shot(&self) {
+        let limit_pps = self.limit_pps.load(std::sync::atomic::Ordering::Relaxed);
+        if limit_pps == 0 {
             return;
         }
+        if self.cnt.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+            self.cnt.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            *self.last.lock().await = Instant::now();
+            return;
+        }
+        let mut last = self.last.lock().await;
         let mut nw = Instant::now();
-        match self.last {
-            None => {
-                self.last = Some(nw);
-                self.cnt = 1;
-                return;
-            }
-            Some(l) => {
-                let elapsed = (nw - l).as_secs_f64();
-                let mut sub_pps = ((self.limit_pps as f64) * elapsed).trunc();
-                if sub_pps < 0f64 {
-                    sub_pps = 0f64;
-                }
-                let sub_pps = sub_pps as usize;
-                if self.cnt <= sub_pps {
-                    self.cnt = 0;
+        let elapsed = (nw - *last).as_secs_f64();
+        let mut sub_pps = ((limit_pps as f64) * elapsed).trunc();
+        if sub_pps < 0f64 {
+            sub_pps = 0f64;
+        }
+        let sub_pps = sub_pps as usize;
+        if self.cnt.load(std::sync::atomic::Ordering::Relaxed) <= sub_pps {
+            self.cnt.store(0, std::sync::atomic::Ordering::Relaxed);
+        } else {
+            self.cnt
+                .fetch_sub(sub_pps, std::sync::atomic::Ordering::Relaxed);
+        }
+        let cnt = self.cnt.load(std::sync::atomic::Ordering::Relaxed);
+        if cnt > 0 {
+            let wd = Duration::from_secs_f64((cnt as f64) / (limit_pps as f64) / 10f64);
+            if wd >= self.minwait_time {
+                tokio::time::sleep(wd).await;
+                let nw2 = Instant::now();
+                let spent = ((nw2 - nw).as_secs_f64() * (limit_pps as f64)).trunc() as usize;
+                if spent >= cnt {
+                    self.cnt.store(0, std::sync::atomic::Ordering::Relaxed);
                 } else {
-                    self.cnt -= sub_pps;
+                    self.cnt
+                        .fetch_sub(spent, std::sync::atomic::Ordering::Relaxed);
                 }
-                if self.cnt > 0 {
-                    let wd = Duration::from_secs_f64(
-                        (self.cnt as f64) / (self.limit_pps as f64) / 10f64,
-                    );
-                    if wd >= self.minwait_time {
-                        tokio::time::sleep(wd).await;
-                        let nw2 = Instant::now();
-                        let spent =
-                            ((nw2 - nw).as_secs_f64() * (self.limit_pps as f64)).trunc() as usize;
-                        if spent >= self.cnt {
-                            self.cnt = 0;
-                        } else {
-                            self.cnt -= spent;
-                        }
-                        nw = nw2;
-                    }
-                }
-                self.cnt += 1;
-                self.last = Some(nw);
+                nw = nw2;
             }
         }
+        self.cnt.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        *last = nw;
     }
 }
-#[derive(Clone)]
 struct SocketLimit {
-    socket: Arc<UdpSocket>,
-    send_limit: Arc<Mutex<LimitBasket>>,
+    socket: UdpSocket,
+    send_limit: LimitBasket,
 }
 impl SocketLimit {
     pub fn new(socket: UdpSocket) -> SocketLimit {
         SocketLimit {
-            socket: Arc::new(socket),
-            send_limit: Arc::new(Mutex::new(LimitBasket::new(0))),
+            socket,
+            send_limit: LimitBasket::new(0),
         }
     }
     pub async fn set_send_limit(&self, limit_pps: usize) {
-        self.send_limit.lock().await.set_limit(limit_pps);
+        self.send_limit.set_limit(limit_pps);
     }
     pub fn local_addr(&self) -> std::io::Result<SocketAddr> {
         self.socket.local_addr()
@@ -158,15 +157,12 @@ impl SocketLimit {
         self.socket.recv_from(buf).await
     }
     pub async fn send_to<A: ToSocketAddrs>(&self, buf: &[u8], target: A) -> std::io::Result<usize> {
-        {
-            let mut limit_guard = self.send_limit.lock().await;
-            limit_guard.shot().await;
-        };
+        self.send_limit.shot().await;
         self.socket.send_to(buf, target).await
     }
 }
 pub struct SNMPSession {
-    socket: SocketLimit,
+    socket: Arc<SocketLimit>,
     community: Vec<u8>,
     req_id: Wrapping<i32>,
     version: i32,
@@ -360,20 +356,20 @@ impl SNMPSession {
 }
 #[derive(Clone)]
 struct SNMPSocketInner {
-    socket: SocketLimit,
+    socket: Arc<SocketLimit>,
     sessions: Arc<RwLock<BTreeMap<SocketAddr, Sender<Vec<u8>>>>>,
 }
 impl SNMPSocketInner {
     async fn new() -> std::io::Result<Self> {
         let socket = UdpSocket::bind((std::net::Ipv4Addr::new(0, 0, 0, 0), 0)).await?;
         Ok(Self {
-            socket: SocketLimit::new(socket),
+            socket: Arc::new(SocketLimit::new(socket)),
             sessions: Arc::new(RwLock::new(BTreeMap::new())),
         })
     }
     fn from_socket(socket: UdpSocket) -> Self {
         Self {
-            socket: SocketLimit::new(socket),
+            socket: Arc::new(SocketLimit::new(socket)),
             sessions: Arc::new(RwLock::new(BTreeMap::new())),
         }
     }
