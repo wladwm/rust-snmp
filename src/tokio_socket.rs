@@ -208,22 +208,19 @@ impl SNMPSession {
     pub async fn set_send_limit(&self, limit_pps: usize) {
         self.socket.set_send_limit(limit_pps).await;
     }
-    async fn send_and_recv(&mut self) -> SnmpResult<SNMPResponse> {
+    async fn send_and_recv_timeout(&mut self, timeout: Duration) -> SnmpResult<SNMPResponse> {
         let _sent_bytes = match self.socket.send_to(&self.send_pdu[..], self.host).await {
             Err(e) => {
                 return Err(SnmpError::SendError(format!("{}", e)));
             }
             Ok(sendres) => sendres,
         };
-        match self.rx.recv().await {
-            None => Err(SnmpError::ReceiveError("Received None".to_string())),
-            Some(pdubuf) => Ok(SNMPResponse::from_vec(pdubuf)?),
-        }
-    }
-    async fn send_and_recv_timeout(&mut self, timeout: Duration) -> SnmpResult<SNMPResponse> {
-        match time::timeout(timeout, self.send_and_recv()).await {
+        match time::timeout(timeout, self.rx.recv()).await {
             Err(_) => Err(SnmpError::Timeout),
-            Ok(resio) => resio,
+            Ok(resio) => match resio {
+                None => Err(SnmpError::ReceiveError("Received None".to_string())),
+                Some(pdubuf) => Ok(SNMPResponse::from_vec(pdubuf)?),
+            }
         }
     }
     async fn send_and_recv_repeat(
