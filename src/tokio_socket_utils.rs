@@ -106,6 +106,9 @@ where
             func,
         }
     }
+    fn get_session_name(&self) -> Option<String> {
+        self.inner.as_ref().map(|x| x.sess.host.to_string())
+    }
 }
 impl<'a: 'c, 'b: 'c, 'c, F, T> Stream for SnmpWalk<'a, 'b, 'c, F, T>
 where
@@ -126,17 +129,31 @@ where
                             let nm = match q.0.read_name(&mut oidname) {
                                 Ok(n) => n,
                                 Err(e) => {
-                                    warn!("SnmpWalk read_name error {}",e);
-                                    continue
-                                },
+                                    warn!(
+                                        "SnmpWalk {} read_name error {}",
+                                        self.get_session_name().unwrap_or_default(),
+                                        e
+                                    );
+                                    continue;
+                                }
                             };
                             let walkoid = self.inner.as_ref().unwrap().walkoid;
                             if nm.len() < walkoid.len() {
-                                trace!("SnmpWalk name len {}<{}",nm.len(),walkoid.len());
+                                trace!(
+                                    "SnmpWalk {} name len {}<{}",
+                                    self.get_session_name().unwrap_or_default(),
+                                    nm.len(),
+                                    walkoid.len()
+                                );
                                 return Poll::Ready(None);
                             }
                             if !nm[0..walkoid.len()].eq(walkoid) {
-                                trace!("SnmpWalk name {:?} does not match {:?}",nm,walkoid);
+                                trace!(
+                                    "SnmpWalk {} name {:?} does not match {:?}",
+                                    self.get_session_name().unwrap_or_default(),
+                                    nm,
+                                    walkoid
+                                );
                                 return Poll::Ready(None);
                             }
                             Some(((self.func)(q.0, q.1), nm.to_vec(), vars.pos()))
@@ -180,16 +197,30 @@ where
                 Err(e) => return Poll::Ready(Some(Err(e))), //invalid response
             };
             if nm.len() < r.1.walkoid.len() {
-                trace!("SnmpWalk name len {}<{}",nm.len(),r.1.walkoid.len());
+                trace!(
+                    "SnmpWalk {} name len {}<{}",
+                    self.get_session_name().unwrap_or_default(),
+                    nm.len(),
+                    r.1.walkoid.len()
+                );
                 return Poll::Ready(None);
             }
             if nm.eq(r.1.walkoid) {
-                warn!("SnmpWalk response {:?} OID is not increasing", fv);
+                warn!(
+                    "SnmpWalk {} response {:?} OID is not increasing",
+                    self.get_session_name().unwrap_or_default(),
+                    fv
+                );
                 return Poll::Ready(Some(Err(SnmpError::OidIsNotIncreasing)));
             };
             if !r.1.walkoid.eq(&nm[0..r.1.walkoid.len()]) {
                 // walk finished
-                trace!("Response {:?} walk finished for {:?}",fv,r.1.walkoid);
+                trace!(
+                    "SnmpWalk {} response {:?} walk finished for {:?}",
+                    self.get_session_name().unwrap_or_default(),
+                    fv,
+                    r.1.walkoid
+                );
                 return Poll::Ready(None);
             }
             self.rsp = Some(r.0);

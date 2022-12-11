@@ -455,7 +455,7 @@ impl SNMPSocket {
             if !sess.is_closed() {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::AddrInUse,
-                    "Session already exists",
+                    format!("Session {} already exists", socketaddr),
                 ));
             }
         }
