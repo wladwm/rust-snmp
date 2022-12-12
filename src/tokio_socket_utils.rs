@@ -199,7 +199,7 @@ where
             if nm.len() < r.1.walkoid.len() {
                 trace!(
                     "SnmpWalk {} name len {}<{}",
-                    self.get_session_name().unwrap_or_default(),
+                    r.1.sess.host.to_string(),
                     nm.len(),
                     r.1.walkoid.len()
                 );
@@ -207,9 +207,10 @@ where
             }
             if nm.eq(r.1.walkoid) {
                 warn!(
-                    "SnmpWalk {} response {:?} OID is not increasing",
-                    self.get_session_name().unwrap_or_default(),
-                    fv
+                    "SnmpWalk {} response {:?} OID {:?} is not increasing",
+                    r.1.sess.host.to_string(),
+                    fv,
+                    nm
                 );
                 return Poll::Ready(Some(Err(SnmpError::OidIsNotIncreasing)));
             };
@@ -217,7 +218,7 @@ where
                 // walk finished
                 trace!(
                     "SnmpWalk {} response {:?} walk finished for {:?}",
-                    self.get_session_name().unwrap_or_default(),
+                    r.1.sess.host.to_string(),
                     fv,
                     r.1.walkoid
                 );
