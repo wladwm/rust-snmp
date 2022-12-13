@@ -138,7 +138,7 @@ pub enum SnmpError {
     SendError(String),
     ReceiveError(String),
     Timeout,
-    OidIsNotIncreasing
+    OidIsNotIncreasing,
 }
 impl fmt::Display for SnmpError {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -534,6 +534,32 @@ pub mod pdu {
                         buf.push_null(); // value
                         buf.push_object_identifier(name); // name
                     })
+                });
+                buf.push_integer(0); // error index
+                buf.push_integer(0); // error status
+                buf.push_integer(req_id as i64);
+            });
+            buf.push_octet_string(community);
+            push_version(buf, version);
+        });
+    }
+    pub fn build_getmulti(
+        community: &[u8],
+        req_id: i32,
+        names: &[&[u32]],
+        buf: &mut Buf,
+        version: i32,
+    ) {
+        buf.reset();
+        buf.push_sequence(|buf| {
+            buf.push_constructed(snmp::MSG_GET, |buf| {
+                buf.push_sequence(|buf| {
+                    for name in names.iter().rev() {
+                        buf.push_sequence(|buf| {
+                            buf.push_null(); // value
+                            buf.push_object_identifier(name); // name
+                        });
+                    }
                 });
                 buf.push_integer(0); // error index
                 buf.push_integer(0); // error status
@@ -1283,7 +1309,7 @@ impl<'a> Value<'a> {
     pub fn get_string(&self) -> Option<String> {
         match self {
             Value::OctetString(u) => return Some(String::from_utf8_lossy(u).to_string()),
-            _ => return Some(format!("{}",self)),
+            _ => return Some(format!("{}", self)),
         }
     }
     pub fn get_u64(&self) -> Option<u64> {

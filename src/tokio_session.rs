@@ -165,7 +165,42 @@ impl TokioSession {
         }
         Ok(resp)
     }
-
+    pub async fn getmulti(
+        &mut self,
+        names: &[&[u32]],
+        repeat: u32,
+        timeout: Duration,
+    ) -> SnmpResult<SnmpPdu<'_>> {
+        let req_id = self.req_id.0;
+        pdu::build_getmulti(
+            self.community.as_slice(),
+            req_id,
+            names,
+            &mut self.send_pdu,
+            self.version,
+        );
+        let recv_len = Self::send_and_recv_repeat(
+            &mut self.socket,
+            &self.send_pdu,
+            &mut self.recv_buf[..],
+            repeat,
+            timeout,
+        )
+        .await?;
+        self.req_id += Wrapping(1);
+        let pdu_bytes = &self.recv_buf[..recv_len];
+        let resp = SnmpPdu::from_bytes(pdu_bytes)?;
+        if resp.message_type != SnmpMessageType::Response {
+            return Err(SnmpError::AsnWrongType);
+        }
+        if resp.req_id != req_id {
+            return Err(SnmpError::RequestIdMismatch);
+        }
+        if resp.community != &self.community[..] {
+            return Err(SnmpError::CommunityMismatch);
+        }
+        Ok(resp)
+    }
     pub async fn get_oid_next(
         &mut self,
         oid: &str,

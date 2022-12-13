@@ -220,7 +220,7 @@ impl SNMPSession {
             Ok(resio) => match resio {
                 None => Err(SnmpError::ReceiveError("Received None".to_string())),
                 Some(pdubuf) => Ok(SNMPResponse::from_vec(pdubuf)?),
-            }
+            },
         }
     }
     async fn send_and_recv_repeat(
@@ -265,6 +265,21 @@ impl SNMPSession {
             self.community.as_slice(),
             self.req_id.0,
             name,
+            &mut self.send_pdu,
+            self.version,
+        );
+        self.send_and_get(repeat, timeout).await
+    }
+    pub async fn getmulti(
+        &mut self,
+        names: &[&[u32]],
+        repeat: u32,
+        timeout: Duration,
+    ) -> SnmpResult<SNMPResponse> {
+        pdu::build_getmulti(
+            self.community.as_slice(),
+            self.req_id.0,
+            names,
             &mut self.send_pdu,
             self.version,
         );
