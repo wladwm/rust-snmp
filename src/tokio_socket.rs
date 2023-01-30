@@ -6,10 +6,10 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::num::Wrapping;
 use std::sync::Arc;
+use std::sync::{Mutex, RwLock};
 use std::time::Instant;
 use tokio::net::{lookup_host, ToSocketAddrs, UdpSocket};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
-use tokio::sync::{Mutex, RwLock};
 use tokio::time::{self, Duration};
 const BUFFER_SIZE: usize = 4096;
 
@@ -74,18 +74,14 @@ impl SNMPResponse {
 }
 
 struct LimitBasket {
-    last: Mutex<Instant>,
-    cnt: std::sync::atomic::AtomicUsize,
+    last: tokio::sync::Mutex<(Instant, usize)>,
     limit_pps: std::sync::atomic::AtomicUsize,
-    minwait_time: Duration,
 }
 impl LimitBasket {
     fn new(limit_pps: usize) -> LimitBasket {
         LimitBasket {
-            last: Mutex::new(Instant::now()),
-            cnt: std::sync::atomic::AtomicUsize::new(0),
+            last: tokio::sync::Mutex::new((Instant::now(), 0)),
             limit_pps: std::sync::atomic::AtomicUsize::new(limit_pps),
-            minwait_time: Duration::from_millis(10),
         }
     }
     fn set_limit(&self, limit_pps: usize) {
@@ -97,43 +93,38 @@ impl LimitBasket {
         if limit_pps == 0 {
             return;
         }
-        if self.cnt.load(std::sync::atomic::Ordering::Relaxed) == 0 {
-            self.cnt.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            *self.last.lock().await = Instant::now();
+        let mut last = self.last.lock().await;
+        if last.1 == 0 {
+            last.1 = 1;
+            last.0 = Instant::now();
             return;
         }
-        let mut last = self.last.lock().await;
         let mut nw = Instant::now();
-        let elapsed = (nw - *last).as_secs_f64();
+        let elapsed = (nw - last.0).as_secs_f64();
         let mut sub_pps = ((limit_pps as f64) * elapsed).trunc();
         if sub_pps < 0f64 {
             sub_pps = 0f64;
         }
         let sub_pps = sub_pps as usize;
-        if self.cnt.load(std::sync::atomic::Ordering::Relaxed) <= sub_pps {
-            self.cnt.store(0, std::sync::atomic::Ordering::Relaxed);
+        if last.1 <= sub_pps {
+            last.1 = 0;
         } else {
-            self.cnt
-                .fetch_sub(sub_pps, std::sync::atomic::Ordering::Relaxed);
+            last.1 -= sub_pps;
         }
-        let cnt = self.cnt.load(std::sync::atomic::Ordering::Relaxed);
-        if cnt > 0 {
-            let wd = Duration::from_secs_f64((cnt as f64) / (limit_pps as f64) / 10f64);
-            if wd >= self.minwait_time {
-                tokio::time::sleep(wd).await;
-                let nw2 = Instant::now();
-                let spent = ((nw2 - nw).as_secs_f64() * (limit_pps as f64)).trunc() as usize;
-                if spent >= cnt {
-                    self.cnt.store(0, std::sync::atomic::Ordering::Relaxed);
-                } else {
-                    self.cnt
-                        .fetch_sub(spent, std::sync::atomic::Ordering::Relaxed);
-                }
-                nw = nw2;
+        if last.1 > 0 {
+            let wd = Duration::from_secs_f64((last.1 as f64) / (limit_pps as f64));
+            tokio::time::sleep(wd).await;
+            let nw2 = Instant::now();
+            let spent = ((nw2 - nw).as_secs_f64() * (limit_pps as f64)).trunc() as usize;
+            if spent >= last.1 {
+                last.1 = 0;
+            } else {
+                last.1 -= spent;
             }
+            nw = nw2;
         }
-        self.cnt.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        *last = nw;
+        last.1 += 1;
+        last.0 = nw;
     }
 }
 struct SocketLimit {
@@ -386,7 +377,7 @@ impl SNMPSocketInner {
         }
     }
     async fn clear_closed_sessions(&self) -> usize {
-        let mut grd = self.sessions.write().await;
+        let mut grd = self.sessions.write().unwrap();
         grd.retain(|_k, v| !v.is_closed());
         grd.len()
     }
@@ -397,7 +388,8 @@ impl SNMPSocketInner {
         buf.resize(BUFFER_SIZE, 0);
         let mbuf = buf.as_mut_slice();
         loop {
-            if self.recv_one(mbuf).await.is_err() {
+            if let Err(e) = self.recv_one(mbuf).await {
+                trace!("receive task error: {}", e);
                 break;
             }
         }
@@ -406,7 +398,7 @@ impl SNMPSocketInner {
     }
     async fn recv_one(&self, buf: &mut [u8]) -> std::io::Result<()> {
         let (len, addr) = self.socket.recv_from(buf).await?;
-        let res = match self.sessions.read().await.get(&addr) {
+        let res = match self.sessions.read().unwrap().get(&addr) {
             None => {
                 warn!("Unknown host {:?} - {} bytes received from", addr, len);
                 return Ok(());
@@ -466,7 +458,7 @@ impl SNMPSocket {
             }
             Some(a) => a,
         };
-        if let Some(sess) = self.inner.sessions.read().await.get(&socketaddr) {
+        if let Some(sess) = self.inner.sessions.read().unwrap().get(&socketaddr) {
             if !sess.is_closed() {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::AddrInUse,
@@ -475,15 +467,15 @@ impl SNMPSocket {
             }
         }
         let (tx, rx) = channel(100);
-        self.inner.sessions.write().await.insert(socketaddr, tx);
+        self.inner.sessions.write().unwrap().insert(socketaddr, tx);
         {
             let recv_task = self.recv_task.clone();
-            let mut rt_g = self.recv_task.lock().await;
+            let mut rt_g = self.recv_task.lock().unwrap();
             let inner = self.inner.clone();
             if rt_g.is_none() {
                 *rt_g = Some(tokio::spawn(async move {
                     inner.run().await;
-                    recv_task.lock().await.take();
+                    recv_task.lock().unwrap().take();
                 }));
             }
         }
