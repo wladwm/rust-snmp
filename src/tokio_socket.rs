@@ -111,7 +111,7 @@ impl LimitBasket {
         } else {
             last.1 -= sub_pps;
         }
-        if last.1 > 0 {
+        if last.1 >= (limit_pps/1000) {
             let wd = Duration::from_secs_f64((last.1 as f64) / (limit_pps as f64));
             tokio::time::sleep(wd).await;
             let nw2 = Instant::now();
