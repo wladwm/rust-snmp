@@ -1385,7 +1385,7 @@ impl<'a> fmt::Display for Value<'a> {
         match *self {
             Boolean(v) => write!(f, "{}", v),
             Integer(n) => write!(f, "{}", n),
-            OctetString(slice) => write!(f, "{}", String::from_utf8_lossy(slice)),
+            OctetString(slice) => write!(f, "{}", String::from_utf8_lossy(slice).escape_debug()),
             ObjectIdentifier(ref obj_id) => write!(f, "{}", obj_id),
             Null => write!(f, "NULL"),
             Sequence(ref val) => write!(f, "{:#?}", val),
@@ -1420,7 +1420,7 @@ impl<'a> fmt::Debug for Value<'a> {
         match *self {
             Boolean(v) => write!(f, "BOOLEAN: {}", v),
             Integer(n) => write!(f, "INTEGER: {}", n),
-            OctetString(slice) => write!(f, "OCTET STRING: {}", String::from_utf8_lossy(slice)),
+            OctetString(slice) => write!(f, "OCTET STRING: {}", String::from_utf8_lossy(slice).escape_debug()),
             ObjectIdentifier(ref obj_id) => write!(f, "OBJECT IDENTIFIER: {}", obj_id),
             Null => write!(f, "NULL"),
             Sequence(ref val) => write!(f, "SEQUENCE: {:#?}", val),
