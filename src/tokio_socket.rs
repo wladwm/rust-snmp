@@ -2,6 +2,7 @@ use crate::{
     asn1, get_oid_array, pdu, AsnReader, ObjectIdentifier, SnmpError, SnmpMessageType, SnmpResult,
     Value, Varbinds,
 };
+
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::num::Wrapping;
@@ -54,7 +55,7 @@ impl SNMPResponse {
         }
 
         let varbind_bytes = response_pdu.read_raw(asn1::TYPE_SEQUENCE)?.to_vec();
-        //let varbinds = Varbinds::from_bytes(varbind_bytes);
+
         Ok(SNMPResponse {
             varbind_bytes,
             version,
@@ -111,7 +112,7 @@ impl LimitBasket {
         } else {
             last.1 -= sub_pps;
         }
-        if last.1 >= (limit_pps/1000) {
+        if last.1 >= (limit_pps / 1000) {
             let wd = Duration::from_secs_f64((last.1 as f64) / (limit_pps as f64));
             tokio::time::sleep(wd).await;
             let nw2 = Instant::now();
@@ -158,7 +159,8 @@ pub struct SNMPSession {
     req_id: Wrapping<i32>,
     version: i32,
     pub host: SocketAddr,
-    rx: Receiver<Vec<u8>>,
+    need_reqid: Arc<std::sync::atomic::AtomicI32>,
+    rx: Receiver<SNMPResponse>,
     send_pdu: pdu::Buf,
 }
 impl SNMPSession {
@@ -210,7 +212,7 @@ impl SNMPSession {
             Err(_) => Err(SnmpError::Timeout),
             Ok(resio) => match resio {
                 None => Err(SnmpError::ReceiveError("Received None".to_string())),
-                Some(pdubuf) => Ok(SNMPResponse::from_vec(pdubuf)?),
+                Some(pdubuf) => Ok(pdubuf),
             },
         }
     }
@@ -233,6 +235,8 @@ impl SNMPSession {
     }
     async fn send_and_get(&mut self, repeat: u32, timeout: Duration) -> SnmpResult<SNMPResponse> {
         let req_id = self.req_id.0;
+        self.need_reqid
+            .store(req_id, std::sync::atomic::Ordering::Relaxed);
         let rpdu = self.send_and_recv_repeat(repeat, timeout).await?;
         self.req_id += Wrapping(1);
         if rpdu.message_type != SnmpMessageType::Response {
@@ -357,10 +361,84 @@ impl SNMPSession {
             .await
     }
 }
+
+struct SNMPSessionBack {
+    reqid: Arc<std::sync::atomic::AtomicI32>,
+    txresp: Sender<SNMPResponse>,
+}
+impl SNMPSessionBack {
+    fn new(
+        reqid: Arc<std::sync::atomic::AtomicI32>,
+        txresp: Sender<SNMPResponse>,
+    ) -> SNMPSessionBack {
+        SNMPSessionBack { reqid, txresp }
+    }
+}
+enum SNMPSessionBacks {
+    Few(SNMPSessionBack),
+    Many(Vec<SNMPSessionBack>),
+}
+impl SNMPSessionBacks {
+    fn new(
+        reqid: Arc<std::sync::atomic::AtomicI32>,
+        txresp: Sender<SNMPResponse>,
+    ) -> SNMPSessionBacks {
+        SNMPSessionBacks::Few(SNMPSessionBack::new(reqid, txresp))
+    }
+    fn push(&mut self, reqid: Arc<std::sync::atomic::AtomicI32>, txresp: Sender<SNMPResponse>) {
+        let b = SNMPSessionBack::new(reqid, txresp);
+        if let SNMPSessionBacks::Many(m) = self {
+            m.push(b);
+            return;
+        }
+        let mut old = SNMPSessionBacks::Many(vec![b]);
+        std::mem::swap(self, &mut old);
+        if let (SNMPSessionBacks::Many(m), SNMPSessionBacks::Few(o)) = (self, old) {
+            m.push(o);
+        }
+    }
+    fn len(&self) -> usize {
+        match self {
+            SNMPSessionBacks::Few(_) => 1,
+            SNMPSessionBacks::Many(m) => m.len(),
+        }
+    }
+    fn is_empty(&self) -> bool {
+        match self {
+            SNMPSessionBacks::Few(_) => false,
+            SNMPSessionBacks::Many(m) => m.is_empty(),
+        }
+    }
+    fn iter<'a>(&'a self) -> std::slice::Iter<'a, SNMPSessionBack> {
+        match self {
+            SNMPSessionBacks::Many(m) => m.iter(),
+            SNMPSessionBacks::Few(o) => std::slice::from_ref(o).iter(),
+        }
+    }
+    fn iter_mut<'a>(&'a mut self) -> std::slice::IterMut<'a, SNMPSessionBack> {
+        match self {
+            SNMPSessionBacks::Many(m) => m.iter_mut(),
+            SNMPSessionBacks::Few(o) => std::slice::from_mut(o).iter_mut(),
+        }
+    }
+    fn retain<F>(&mut self, mut f: F)
+    where
+        F: FnMut(&SNMPSessionBack) -> bool,
+    {
+        match self {
+            SNMPSessionBacks::Many(m) => m.retain(f),
+            SNMPSessionBacks::Few(o) => {
+                if !f(o) {
+                    *self = SNMPSessionBacks::Many(Vec::new());
+                }
+            }
+        }
+    }
+}
 #[derive(Clone)]
 struct SNMPSocketInner {
     socket: Arc<SocketLimit>,
-    sessions: Arc<RwLock<BTreeMap<SocketAddr, Sender<Vec<u8>>>>>,
+    sessions: Arc<RwLock<BTreeMap<SocketAddr, SNMPSessionBacks>>>,
 }
 impl SNMPSocketInner {
     async fn new() -> std::io::Result<Self> {
@@ -378,7 +456,10 @@ impl SNMPSocketInner {
     }
     async fn clear_closed_sessions(&self) -> usize {
         let mut grd = self.sessions.write().unwrap();
-        grd.retain(|_k, v| !v.is_closed());
+        grd.iter_mut().for_each(|(_, vc)| {
+            vc.retain(|c| !c.txresp.is_closed());
+        });
+        grd.retain(|_k, v| !v.is_empty());
         grd.len()
     }
     async fn run(&self) {
@@ -398,12 +479,33 @@ impl SNMPSocketInner {
     }
     async fn recv_one(&self, buf: &mut [u8]) -> std::io::Result<()> {
         let (len, addr) = self.socket.recv_from(buf).await?;
+
         let res = match self.sessions.read().unwrap().get(&addr) {
             None => {
                 warn!("Unknown host {:?} - {} bytes received from", addr, len);
                 return Ok(());
             }
-            Some(tx) => tx.try_send(buf[0..len].to_vec()),
+            Some(clts) => {
+                let rsp = match SNMPResponse::from_vec(buf[0..len].to_vec()) {
+                    Ok(r) => r,
+                    Err(e) => {
+                        warn!("Snmp error {:?} from {} len {}", e, addr, len);
+                        return Ok(());
+                    }
+                };
+                if clts.len() == 1 {
+                    let c = clts.iter().next().unwrap();
+                    c.txresp.try_send(rsp)
+                } else {
+                    match clts
+                        .iter()
+                        .find(|c| c.reqid.load(std::sync::atomic::Ordering::Relaxed) == rsp.req_id)
+                    {
+                        Some(c) => c.txresp.try_send(rsp),
+                        None => return Ok(()), //Err(tokio::sync::mpsc::error::TrySendError::Closed(rsp)),
+                    }
+                }
+            }
         };
         if let Err(e) = res {
             warn!("Warning: SNMP error pass response to {}: {}", addr, e);
@@ -442,7 +544,7 @@ impl SNMPSocket {
         &self,
         hostaddr: SA,
         community: &[u8],
-        starting_req_id: i32,
+        mut starting_req_id: i32,
         version: i32,
     ) -> std::io::Result<SNMPSession> {
         let la = self.inner.socket.local_addr()?;
@@ -458,16 +560,18 @@ impl SNMPSocket {
             }
             Some(a) => a,
         };
-        if let Some(sess) = self.inner.sessions.read().unwrap().get(&socketaddr) {
-            if !sess.is_closed() {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::AddrInUse,
-                    format!("Session {} already exists", socketaddr),
-                ));
-            }
-        }
+        let mut sess = self.inner.sessions.write().unwrap();
         let (tx, rx) = channel(100);
-        self.inner.sessions.write().unwrap().insert(socketaddr, tx);
+        let nreqid = Arc::new(std::sync::atomic::AtomicI32::new(0));
+        if sess.get(&socketaddr).is_none() {
+            sess.insert(socketaddr, SNMPSessionBacks::new(nreqid.clone(), tx));
+        } else {
+            let lng = sess.get(&socketaddr).unwrap().len();
+            if starting_req_id < 2 && lng > 0 {
+                starting_req_id = (lng * 100) as i32;
+            };
+            sess.get_mut(&socketaddr).unwrap().push(nreqid.clone(), tx);
+        }
         {
             let recv_task = self.recv_task.clone();
             let mut rt_g = self.recv_task.lock().unwrap();
@@ -483,6 +587,7 @@ impl SNMPSocket {
             socket: self.inner.socket.clone(),
             community: community.to_vec(),
             req_id: Wrapping(starting_req_id),
+            need_reqid: nreqid,
             version,
             host: socketaddr,
             rx,
