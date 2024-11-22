@@ -47,8 +47,8 @@
 //! let community     = b"f00b4r";
 //! let timeout       = Duration::from_secs(2);
 //!
-//! let mut sess = SyncSession::new(agent_addr, community, Some(timeout), 0).unwrap();
-//! let mut response = sess.getnext(sys_descr_oid).unwrap();
+//! let mut sess = SyncSession::new(agent_addr, community, Some(timeout), 1, 0).unwrap();
+//! let mut response = sess.getnext(sys_descr_oid, 1).unwrap();
 //! if let Some((_oid, Value::OctetString(sys_descr))) = response.varbinds.next() {
 //!     println!("myrouter sysDescr: {}", String::from_utf8_lossy(sys_descr));
 //! }
@@ -65,7 +65,7 @@
 //! let non_repeaters   = 0;
 //! let max_repetitions = 7; // number of items in "system" OID
 //!
-//! let mut sess = SyncSession::new(agent_addr, community, Some(timeout), 0).unwrap();
+//! let mut sess = SyncSession::new(agent_addr, community, Some(timeout), 1, 0).unwrap();
 //! let response = sess.getbulk(&[system_oid], non_repeaters, max_repetitions).unwrap();
 //!
 //! for (name, val) in response.varbinds {
@@ -83,8 +83,8 @@
 //! let community       = b"f00b4r";
 //! let timeout         = Duration::from_secs(2);
 //!
-//! let mut sess = SyncSession::new(agent_addr, community, Some(timeout), 0).unwrap();
-//! let response = sess.set(&[(syscontact_oid, contact)]).unwrap();
+//! let mut sess = SyncSession::new(agent_addr, community, Some(timeout), 1, 0).unwrap();
+//! let response = sess.set(&[(syscontact_oid, contact)], 1).unwrap();
 //!
 //! assert_eq!(response.error_status, snmp::snmp::ERRSTATUS_NOERROR);
 //! for (name, val) in response.varbinds {
@@ -1420,7 +1420,11 @@ impl<'a> fmt::Debug for Value<'a> {
         match *self {
             Boolean(v) => write!(f, "BOOLEAN: {}", v),
             Integer(n) => write!(f, "INTEGER: {}", n),
-            OctetString(slice) => write!(f, "OCTET STRING: {}", String::from_utf8_lossy(slice).escape_debug()),
+            OctetString(slice) => write!(
+                f,
+                "OCTET STRING: {}",
+                String::from_utf8_lossy(slice).escape_debug()
+            ),
             ObjectIdentifier(ref obj_id) => write!(f, "OBJECT IDENTIFIER: {}", obj_id),
             Null => write!(f, "NULL"),
             Sequence(ref val) => write!(f, "SEQUENCE: {:#?}", val),
