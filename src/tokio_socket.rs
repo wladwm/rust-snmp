@@ -415,12 +415,14 @@ impl SNMPSessionBacks {
             SNMPSessionBacks::Few(o) => std::slice::from_ref(o).iter(),
         }
     }
+    /*
     fn iter_mut<'a>(&'a mut self) -> std::slice::IterMut<'a, SNMPSessionBack> {
         match self {
             SNMPSessionBacks::Many(m) => m.iter_mut(),
             SNMPSessionBacks::Few(o) => std::slice::from_mut(o).iter_mut(),
         }
     }
+    */
     fn retain<F>(&mut self, mut f: F)
     where
         F: FnMut(&SNMPSessionBack) -> bool,
