@@ -72,7 +72,7 @@ unsafe impl<'a, 'b> Send for SnmpWalkInner<'a, 'b> {}
 #[must_use = "futures do nothing unless you `.await` or poll them"]
 pub struct SnmpWalk<'a: 'c, 'b: 'c, 'c, F, T>
 where
-    F: Fn(ObjectIdentifier, Value) -> Option<T>,
+    F: Fn(ObjectIdentifier, Value, &SNMPResponse) -> Option<T>,
 {
     inner: Option<SnmpWalkInner<'a, 'b>>,
     rsp: Option<SNMPResponse>,
@@ -81,16 +81,16 @@ where
     func: F,
 }
 impl<'a, 'b, 'c, F, T> Unpin for SnmpWalk<'a, 'b, 'c, F, T> where
-    F: Fn(ObjectIdentifier, Value) -> Option<T>
+    F: Fn(ObjectIdentifier, Value, &SNMPResponse) -> Option<T>
 {
 }
 unsafe impl<'a, 'b, 'c, F, T> Send for SnmpWalk<'a, 'b, 'c, F, T> where
-    F: Fn(ObjectIdentifier, Value) -> Option<T>
+    F: Fn(ObjectIdentifier, Value, &SNMPResponse) -> Option<T>
 {
 }
 impl<'a: 'c, 'b: 'c, 'c, F, T> SnmpWalk<'a, 'b, 'c, F, T>
 where
-    F: Fn(ObjectIdentifier, Value) -> Option<T>,
+    F: Fn(ObjectIdentifier, Value, &SNMPResponse) -> Option<T>,
 {
     pub fn new(
         sess: &'a mut SNMPSession,
@@ -112,14 +112,49 @@ where
 }
 impl<'a: 'c, 'b: 'c, 'c, F, T> Stream for SnmpWalk<'a, 'b, 'c, F, T>
 where
-    F: Fn(ObjectIdentifier, Value) -> Option<T>,
+    F: Fn(ObjectIdentifier, Value, &SNMPResponse) -> Option<T>,
 {
     type Item = Result<T, SnmpError>;
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         loop {
-            let q = match self.rsp {
+            let need_restart_no_bulk = match self.rsp.as_ref() {
+                None => false,
+                Some(rsp) => {
+                    if rsp.error_status != 0 {
+                        if let Some(inr) = self.inner.as_ref() {
+                            trace!(
+                                "SnmpWalk {} need_restart_no_bulk check error_status {}",
+                                self.get_session_name().unwrap_or_default(),
+                                rsp.error_status
+                            );
+                            inr.params.bulk > 0
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    }
+                }
+            };
+            if need_restart_no_bulk {
+                let sessname = self.get_session_name().unwrap_or_default();
+                if let Some(inr) = self.inner.as_mut() {
+                    trace!("SnmpWalk {} switch off bulk {}", sessname, inr.params.bulk);
+                    inr.params.bulk = 0
+                }
+                let _ = self.rsp.take(); //ignore error response for first time
+                continue;
+            }
+            let bulk = self.inner.as_ref().map(|inr| inr.params.bulk).unwrap_or(0);
+            let q = match self.rsp.as_ref() {
                 None => None,
-                Some(ref rsp) => {
+                Some(rsp) => {
+                    trace!(
+                        "SnmpWalk adv {} error_status {} bulk {}",
+                        self.get_session_name().unwrap_or_default(),
+                        rsp.error_status,
+                        bulk
+                    );
                     let mut vars = rsp.varbinds();
                     vars.advance(self.pos);
                     match vars.next() {
@@ -156,7 +191,7 @@ where
                                 );
                                 return Poll::Ready(None);
                             }
-                            Some(((self.func)(q.0, q.1), nm.to_vec(), vars.pos()))
+                            Some(((self.func)(q.0, q.1, rsp), nm.to_vec(), vars.pos()))
                         }
                     }
                 }
@@ -186,6 +221,20 @@ where
                     Ok(r) => r,
                 },
             };
+            let bulk = self.inner.as_ref().map(|inr| inr.params.bulk).unwrap_or(0);
+            trace!(
+                "SnmpWalk got {} error_status {} bulk {}",
+                r.1.sess.host.to_string(),
+                r.0.error_status,
+                bulk
+            );
+            if r.0.error_status != 0 && bulk > 0 {
+                trace!("SnmpWalk {} switch off bulk", r.1.sess.host.to_string());
+                if let Some(inr) = self.inner.as_mut() {
+                    inr.params.bulk = 0;
+                }
+                continue;
+            }
             let mut vars = r.0.varbinds();
             let fv = match vars.next() {
                 None => return Poll::Ready(None), //empty response
