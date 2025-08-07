@@ -327,9 +327,9 @@ pub mod pdu {
             self.len += scribbled;
         }
 
-        fn push_constructed<F>(&mut self, ident: u8, mut f: F)
+        fn push_constructed<F>(&mut self, ident: u8, f: F)
         where
-            F: FnMut(&mut Self),
+            F: FnOnce(&mut Self),
         {
             let before_len = self.len;
             f(self);
@@ -340,7 +340,7 @@ pub mod pdu {
 
         fn push_sequence<F>(&mut self, f: F)
         where
-            F: FnMut(&mut Self),
+            F: FnOnce(&mut Self),
         {
             self.push_constructed(asn1::TYPE_SEQUENCE, f)
         }
@@ -543,21 +543,25 @@ pub mod pdu {
             push_version(buf, version);
         });
     }
-    pub fn build_getmulti(
+    pub fn build_getmulti<NAMES,OBJNM>(
         community: &[u8],
         req_id: i32,
-        names: &[&[u32]],
+        names: NAMES,//&[&[u32]],
         buf: &mut Buf,
         version: i32,
-    ) {
+    ) where 
+    NAMES: std::iter::IntoIterator<Item=OBJNM>+Copy,
+    NAMES::IntoIter: DoubleEndedIterator,
+    OBJNM: AsRef<[u32]>
+    {
         buf.reset();
         buf.push_sequence(|buf| {
             buf.push_constructed(snmp::MSG_GET, |buf| {
                 buf.push_sequence(|buf| {
-                    for name in names.iter().rev() {
+                    for name in names.into_iter().rev() {
                         buf.push_sequence(|buf| {
                             buf.push_null(); // value
-                            buf.push_object_identifier(name); // name
+                            buf.push_object_identifier(name.as_ref()); // name
                         });
                     }
                 });
@@ -595,22 +599,26 @@ pub mod pdu {
         });
     }
 
-    pub fn build_getbulk(
+    pub fn build_getbulk<NAMES,OBJNM>(
         community: &[u8],
         req_id: i32,
-        names: &[&[u32]],
+        names: NAMES,
         non_repeaters: u32,
         max_repetitions: u32,
         buf: &mut Buf,
-    ) {
+    ) where 
+    NAMES: std::iter::IntoIterator<Item=OBJNM>+Copy,
+    NAMES::IntoIter: DoubleEndedIterator,
+    OBJNM: AsRef<[u32]>
+    {
         buf.reset();
         buf.push_sequence(|buf| {
             buf.push_constructed(snmp::MSG_GET_BULK, |buf| {
                 buf.push_sequence(|buf| {
-                    for name in names.iter().rev() {
+                    for name in names.into_iter().rev() {
                         buf.push_sequence(|buf| {
                             buf.push_null(); // value
-                            buf.push_object_identifier(name); // name
+                            buf.push_object_identifier(name.as_ref()); // name
                         });
                     }
                 });
@@ -679,21 +687,26 @@ pub mod pdu {
         });
     }
 
-    pub fn build_set(
+    pub fn build_set<'c,'b:'c,VLS,OBJNM,VL>(
         community: &[u8],
         req_id: i32,
-        values: &[(&[u32], Value)],
+        values: VLS,//&[(&[u32], Value)],
         buf: &mut Buf,
         version: i32,
-    ) {
+    ) where
+        VLS: std::iter::IntoIterator<Item=&'c (OBJNM, VL)>+Copy,
+        VLS::IntoIter: DoubleEndedIterator,
+        OBJNM: std::ops::Deref<Target=[u32]>+'c,
+        VL: Into<Value<'b>>+Copy+'c
+    {
         buf.reset();
         buf.push_sequence(|buf| {
             buf.push_constructed(snmp::MSG_SET, |buf| {
                 buf.push_sequence(|buf| {
-                    for &(name, val) in values.iter().rev() {
+                    for (name, val) in values.into_iter().rev() {
                         buf.push_sequence(|buf| {
                             use Value::*;
-                            match val {
+                            match (*val).into() {
                                 Boolean(b) => buf.push_boolean(b),
                                 Null => buf.push_null(),
                                 Integer(i) => buf.push_integer(i),
@@ -709,7 +722,7 @@ pub mod pdu {
                                 Counter64(i) => buf.push_counter64(i),
                                 _ => unimplemented!(),
                             }
-                            buf.push_object_identifier(name); // name
+                            buf.push_object_identifier(name.deref()); // name
                         });
                     }
                 });
@@ -722,21 +735,26 @@ pub mod pdu {
         });
     }
 
-    pub fn build_response(
+    pub fn build_response<'c,'b:'c,VLS,OBJNM,VL>(
         community: &[u8],
         req_id: i32,
-        values: &[(&[u32], Value)],
+        values: VLS,//&[(&[u32], Value)],
         buf: &mut Buf,
         version: i32,
-    ) {
+    ) where 
+        VLS: std::iter::IntoIterator<Item=&'c (OBJNM, VL)>+Copy,
+        VLS::IntoIter: DoubleEndedIterator,
+        OBJNM: std::ops::Deref<Target=[u32]>+'c,
+        VL: Into<Value<'b>>+Copy+'c
+    {
         buf.reset();
         buf.push_sequence(|buf| {
             buf.push_constructed(snmp::MSG_RESPONSE, |buf| {
                 buf.push_sequence(|buf| {
-                    for &(name, val) in values.iter().rev() {
+                    for (name, val) in values.into_iter().rev() {
                         buf.push_sequence(|buf| {
                             use Value::*;
-                            match val {
+                            match (*val).into() {
                                 Boolean(b) => buf.push_boolean(b),
                                 Null => buf.push_null(),
                                 Integer(i) => buf.push_integer(i),
@@ -755,7 +773,7 @@ pub mod pdu {
                                 NoSuchInstance => buf.push_nosuchinstance(),
                                 _ => unimplemented!(),
                             }
-                            buf.push_object_identifier(name); // name
+                            buf.push_object_identifier(name.deref()); // name
                         });
                     }
                 });
@@ -858,7 +876,7 @@ impl<'a, 'b> PartialEq<&'b [u32]> for ObjectIdentifier<'a> {
 }
 
 impl<'a> ObjectIdentifier<'a> {
-    fn from_bytes(bytes: &[u8]) -> ObjectIdentifier {
+    pub fn from_bytes(bytes: &[u8]) -> ObjectIdentifier {
         ObjectIdentifier { inner: bytes }
     }
     /*
@@ -1635,12 +1653,16 @@ impl SyncSession {
         }
         Ok(resp)
     }
-    pub fn getbulk(
+    pub fn getbulk<NAMES,OBJNM>(
         &mut self,
-        names: &[&[u32]],
+        names: NAMES,
         non_repeaters: u32,
         max_repetitions: u32,
-    ) -> SnmpResult<SnmpPdu> {
+    ) -> SnmpResult<SnmpPdu> where
+    NAMES: std::iter::IntoIterator<Item=OBJNM>+Copy,
+    NAMES::IntoIter: DoubleEndedIterator,
+    OBJNM: AsRef<[u32]>
+    {
         let req_id = self.req_id.0;
         pdu::build_getbulk(
             self.community.as_slice(),
@@ -1810,7 +1832,7 @@ impl<'a> fmt::Debug for Varbinds<'a> {
 }
 
 impl<'a> Varbinds<'a> {
-    fn from_bytes(bytes: &'a [u8]) -> Varbinds<'a> {
+    pub fn from_bytes(bytes: &'a [u8]) -> Varbinds<'a> {
         Varbinds {
             inner: AsnReader::from_bytes(bytes),
         }

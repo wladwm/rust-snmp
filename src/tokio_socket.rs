@@ -265,12 +265,16 @@ impl SNMPSession {
         );
         self.send_and_get(repeat, timeout).await
     }
-    pub async fn getmulti(
+    pub async fn getmulti<NAMES,OBJNM>(
         &mut self,
-        names: &[&[u32]],
+        names: NAMES,//&[&[u32]],
         repeat: u32,
         timeout: Duration,
-    ) -> SnmpResult<SNMPResponse> {
+    ) -> SnmpResult<SNMPResponse> where 
+        NAMES: std::iter::IntoIterator<Item=OBJNM>+Copy,
+        NAMES::IntoIter: DoubleEndedIterator,
+        OBJNM: AsRef<[u32]>
+    {
         pdu::build_getmulti(
             self.community.as_slice(),
             self.req_id.0,
@@ -296,14 +300,19 @@ impl SNMPSession {
         self.send_and_get(repeat, timeout).await
     }
 
-    pub async fn getbulk(
+    pub async fn getbulk<NAMES,OBJNM>(
         &mut self,
-        names: &[&[u32]],
+        names: NAMES,
         non_repeaters: u32,
         max_repetitions: u32,
         repeat: u32,
         timeout: Duration,
-    ) -> SnmpResult<SNMPResponse> {
+    ) -> SnmpResult<SNMPResponse> 
+    where 
+        NAMES: std::iter::IntoIterator<Item=OBJNM>+Copy,
+        NAMES::IntoIter: DoubleEndedIterator,
+        OBJNM: AsRef<[u32]>
+    {
         pdu::build_getbulk(
             self.community.as_slice(),
             self.req_id.0,
@@ -327,12 +336,18 @@ impl SNMPSession {
     ///   - `Timeticks`
     ///   - `Opaque`
     ///   - `Counter64`
-    pub async fn set(
+    pub async fn set<'c,'b:'c,VLS,OBJNM,VL>(
         &mut self,
-        values: &[(&[u32], Value<'_>)],
+        values: VLS, //&[(&[u32], Value<'_>)],
         repeat: u32,
         timeout: Duration,
-    ) -> SnmpResult<SNMPResponse> {
+    ) -> SnmpResult<SNMPResponse>
+    where 
+        VLS: std::iter::IntoIterator<Item=&'c (OBJNM, VL)>+Copy,
+        VLS::IntoIter: DoubleEndedIterator,
+        OBJNM: std::ops::Deref<Target=[u32]>+'c,
+        VL: Into<Value<'b>>+Copy+'c
+    {
         pdu::build_set(
             self.community.as_slice(),
             self.req_id.0,
