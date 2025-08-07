@@ -202,6 +202,7 @@ impl SNMPSession {
         self.socket.set_send_limit(limit_pps).await;
     }
     async fn send_and_recv_timeout(&mut self, timeout: Duration) -> SnmpResult<SNMPResponse> {
+        while self.rx.try_recv().is_ok() {};
         let _sent_bytes = match self.socket.send_to(&self.send_pdu[..], self.host).await {
             Err(e) => {
                 return Err(SnmpError::SendError(format!("{}", e)));
