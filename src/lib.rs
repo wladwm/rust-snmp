@@ -876,7 +876,7 @@ impl<'a, 'b> PartialEq<&'b [u32]> for ObjectIdentifier<'a> {
 }
 
 impl<'a> ObjectIdentifier<'a> {
-    pub fn from_bytes(bytes: &[u8]) -> ObjectIdentifier {
+    pub fn from_bytes<'src>(bytes: &'src [u8]) -> ObjectIdentifier<'src> {
         ObjectIdentifier { inner: bytes }
     }
     /*
@@ -997,7 +997,7 @@ impl<'a> fmt::Debug for AsnReader<'a> {
 }
 
 impl<'a> AsnReader<'a> {
-    pub fn from_bytes(bytes: &[u8]) -> AsnReader {
+    pub fn from_bytes<'arg>(bytes: &'arg [u8]) -> AsnReader<'arg> {
         AsnReader {
             inner: bytes,
             pos: 0,
@@ -1594,7 +1594,7 @@ impl SyncSession {
         Self::send_and_recv(socket, pdu, out)
     }
 
-    pub fn get(&mut self, name: &[u32], repeat: u32) -> SnmpResult<SnmpPdu> {
+    pub fn get<'slf>(&'slf mut self, name: &[u32], repeat: u32) -> SnmpResult<SnmpPdu<'slf>> {
         let req_id = self.req_id.0;
         pdu::build_get(
             self.community.as_slice(),
@@ -1624,7 +1624,7 @@ impl SyncSession {
         Ok(resp)
     }
 
-    pub fn getnext(&mut self, name: &[u32], repeat: u32) -> SnmpResult<SnmpPdu> {
+    pub fn getnext<'slf>(&'slf mut self, name: &[u32], repeat: u32) -> SnmpResult<SnmpPdu<'slf>> {
         let req_id = self.req_id.0;
         pdu::build_getnext(
             self.community.as_slice(),
@@ -1653,12 +1653,12 @@ impl SyncSession {
         }
         Ok(resp)
     }
-    pub fn getbulk<NAMES,OBJNM>(
-        &mut self,
+    pub fn getbulk<'slf,NAMES,OBJNM>(
+        &'slf mut self,
         names: NAMES,
         non_repeaters: u32,
         max_repetitions: u32,
-    ) -> SnmpResult<SnmpPdu> where
+    ) -> SnmpResult<SnmpPdu<'slf>> where
     NAMES: std::iter::IntoIterator<Item=OBJNM>+Copy,
     NAMES::IntoIter: DoubleEndedIterator,
     OBJNM: AsRef<[u32]>
@@ -1700,7 +1700,7 @@ impl SyncSession {
     ///   - `Timeticks`
     ///   - `Opaque`
     ///   - `Counter64`
-    pub fn set(&mut self, values: &[(&[u32], Value)], repeat: u32) -> SnmpResult<SnmpPdu> {
+    pub fn set<'slf>(&'slf mut self, values: &[(&[u32], Value)], repeat: u32) -> SnmpResult<SnmpPdu<'slf>> {
         let req_id = self.req_id.0;
         pdu::build_set(
             self.community.as_slice(),
