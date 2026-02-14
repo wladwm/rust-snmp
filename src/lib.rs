@@ -104,7 +104,7 @@ use std::num::Wrapping;
 use std::ptr;
 use std::time::Duration;
 
-#[cfg(feature = "async")]
+#[cfg(feature = "simpleasync")]
 pub mod tokio_session;
 #[cfg(feature = "async")]
 pub mod tokio_socket;
@@ -121,7 +121,7 @@ const USIZE_LEN: usize = 8;
 #[cfg(test)]
 mod tests;
 
-#[derive(Debug, PartialEq, Eq, Clone)]
+#[derive(Debug, PartialEq, Eq, Clone, PartialOrd, Ord, Hash)]
 pub enum SnmpCredentials {
     V12 {
         version: u8,
@@ -161,6 +161,7 @@ impl SnmpCredentials {
                 }
                 *version = ver;
             }
+            #[cfg(feature = "v3")]
             _ => {
                 if ver != 3 {
                     return Err(SnmpError::UnsupportedVersion);
@@ -198,6 +199,20 @@ impl std::str::FromStr for SnmpCredentials {
             return Ok(SnmpCredentials::new_v3(s[3..].parse()?));
         }
         return Ok(SnmpCredentials::new_v12(2, unescape_ascii(s)));
+    }
+}
+impl std::fmt::Display for SnmpCredentials {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        match self {
+            SnmpCredentials::V12 { version, community } => {
+                if *version != 2 {
+                    write!(f, "v{}:", *version)?;
+                }
+                write!(f, "{}", community.escape_ascii())
+            }
+            #[cfg(feature = "v3")]
+            SnmpCredentials::V3(s) => s.fmt(f),
+        }
     }
 }
 #[derive(Debug)]
@@ -454,6 +469,14 @@ impl VarbindOid for [u32] {
         None
     }
 }
+impl VarbindOid for Vec<u32> {
+    fn oid<'a>(&'a self) -> &'a [u32] {
+        &self
+    }
+    fn value<'a>(&'a self) -> Option<&'a Value<'a>> {
+        None
+    }
+}
 impl<const N: usize> VarbindOid for [u32; N] {
     fn oid<'a>(&'a self) -> &'a [u32] {
         self
@@ -465,6 +488,14 @@ impl<const N: usize> VarbindOid for [u32; N] {
 impl<'v> VarbindOid for (&[u32], Value<'v>) {
     fn oid<'a>(&'a self) -> &'a [u32] {
         self.0
+    }
+    fn value<'a>(&'a self) -> Option<&'a Value<'a>> {
+        Some(&self.1)
+    }
+}
+impl<'v> VarbindOid for (Vec<u32>, Value<'v>) {
+    fn oid<'a>(&'a self) -> &'a [u32] {
+        &self.0
     }
     fn value<'a>(&'a self) -> Option<&'a Value<'a>> {
         Some(&self.1)

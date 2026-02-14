@@ -249,7 +249,7 @@ impl KeyExtension {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct Security {
     pub(crate) username: Vec<u8>,
     pub(crate) authentication_password: Vec<u8>,
@@ -336,6 +336,35 @@ impl std::str::FromStr for Security {
             ));
         }
         Ok(ret)
+    }
+}
+impl std::fmt::Display for Security {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> Result<(), std::fmt::Error> {
+        if !self.username.is_empty() {
+            write!(f, "username={} ", self.username.escape_ascii())?;
+        }
+        if !self.authentication_password.is_empty() {
+            write!(
+                f,
+                "password={} ",
+                self.authentication_password.escape_ascii()
+            )?;
+        }
+        write!(f, "authproto={} ", self.auth_protocol)?;
+        match self.auth {
+            Auth::NoAuthNoPriv => write!(f, "auth=NoAuthNoPriv")?,
+            Auth::AuthNoPriv => write!(f, "auth=AuthNoPriv")?,
+            Auth::AuthPriv {
+                cipher,
+                privacy_password,
+            } => write!(
+                f,
+                "auth=AuthPriv cipher={} privacy={}",
+                cipher,
+                privacy_password.escape_ascii()
+            )?,
+        }
+        Ok(())
     }
 }
 impl Security {
