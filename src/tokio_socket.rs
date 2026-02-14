@@ -170,7 +170,7 @@ impl SocketLimit {
 }
 pub struct SNMPSession {
     socket: Arc<SocketLimit>,
-    security: Arc<std::sync::RwLock<SnmpSecurity>>,
+    pub security: Arc<std::sync::RwLock<SnmpSecurity>>,
     req_id: Wrapping<i32>,
     pub host: SocketAddr,
     need_reqid: Arc<std::sync::atomic::AtomicI32>,

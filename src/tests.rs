@@ -73,3 +73,18 @@ fn asn_parse_getnext_pdu() {
         })
         .unwrap();
 }
+#[test]
+fn test_unescape() {
+    assert_eq!(
+        b"AbcDef!234".as_slice(),
+        crate::unescape_ascii("AbcDef!234").as_slice()
+    );
+    assert_eq!(
+        b"Ab\rc\nDef!234".as_slice(),
+        crate::unescape_ascii(r#"Ab\rc\nDef!234"#).as_slice()
+    );
+    assert_eq!(
+        b"Ab\rc\nDef!2\x7f34".as_slice(),
+        crate::unescape_ascii(r#"Ab\rc\nDef!2\x7f34"#).as_slice()
+    );
+}

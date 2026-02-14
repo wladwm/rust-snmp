@@ -121,7 +121,7 @@ const USIZE_LEN: usize = 8;
 #[cfg(test)]
 mod tests;
 
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, PartialEq, Eq, Clone)]
 pub enum SnmpCredentials {
     V12 {
         version: u8,
@@ -150,6 +150,25 @@ impl SnmpCredentials {
             SnmpCredentials::V3(_) => 3,
         }
     }
+    pub fn set_version(&mut self, ver: u8) -> SnmpResult<()> {
+        match self {
+            SnmpCredentials::V12 {
+                version,
+                community: _,
+            } => {
+                if ver >= 3 {
+                    return Err(SnmpError::UnsupportedVersion);
+                }
+                *version = ver;
+            }
+            _ => {
+                if ver != 3 {
+                    return Err(SnmpError::UnsupportedVersion);
+                }
+            }
+        };
+        Ok(())
+    }
     #[cfg(feature = "v3")]
     pub fn new_v3(security: v3::Security) -> SnmpCredentials {
         SnmpCredentials::V3(security)
@@ -169,16 +188,16 @@ impl std::str::FromStr for SnmpCredentials {
     type Err = SnmpError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         if s.starts_with("v1:") {
-            return Ok(SnmpCredentials::new_v12(1, s[3..].as_bytes().to_vec()));
+            return Ok(SnmpCredentials::new_v12(1, unescape_ascii(&s[3..])));
         }
         if s.starts_with("v2:") {
-            return Ok(SnmpCredentials::new_v12(2, s[3..].as_bytes().to_vec()));
+            return Ok(SnmpCredentials::new_v12(2, unescape_ascii(&s[3..])));
         }
         #[cfg(feature = "v3")]
         if s.starts_with("v3:") {
             return Ok(SnmpCredentials::new_v3(s[3..].parse()?));
         }
-        return Ok(SnmpCredentials::new_v12(2, s.as_bytes().to_vec()));
+        return Ok(SnmpCredentials::new_v12(2, unescape_ascii(s)));
     }
 }
 #[derive(Debug)]
@@ -1472,3 +1491,95 @@ pub fn get_the_value_from_tv(tv:(u8,&str)) -> Value {
    }
 }
 */
+fn push_char(v: &mut Vec<u8>, c: char) {
+    let mut u = c as u32;
+    if c.len_utf8() == 1 {
+        v.push(u as u8);
+    } else {
+        for _ in 0..c.len_utf8() {
+            v.push((u & 0xff) as u8);
+            u = u >> 8;
+        }
+    }
+}
+
+pub(crate) fn unescape_ascii(s: &str) -> Vec<u8> {
+    let mut ret = Vec::new();
+    let mut mode = 0;
+    let mut accum = 0u32;
+    'st: for c in s.chars() {
+        'cnt: loop {
+            match mode {
+                0 => match c {
+                    '\\' => mode = 1,
+                    _ => {
+                        push_char(&mut ret, c);
+                    }
+                },
+                1 => {
+                    mode = 0;
+                    match c {
+                        '\\' => ret.push('\\' as u8),
+                        't' => ret.push(9),
+                        'r' => ret.push(13),
+                        'n' => ret.push(10),
+                        '0' => {
+                            mode = 2;
+                            accum = 0;
+                        } //octal
+                        'x' | 'X' => {
+                            mode = 3;
+                            accum = 0;
+                        } //hexadecimal
+                        _ => {
+                            ret.push('\\' as u8);
+                            push_char(&mut ret, c);
+                        }
+                    }
+                }
+                2 => match c {
+                    '0'..='7' => {
+                        let accumn = accum * 8 + ((c as u32) - 48);
+                        if accumn > 255 {
+                            ret.push(accum as u8);
+                            push_char(&mut ret, c);
+                            mode = 0;
+                        } else {
+                            accum = accumn;
+                        }
+                        continue 'st;
+                    }
+                    _ => {
+                        ret.push(accum as u8);
+                        mode = 0;
+                        continue 'cnt;
+                    }
+                },
+                3 => match c {
+                    '0'..='9' | 'a'..='f' | 'A'..='F' => {
+                        let accumn = accum * 16 + c.to_digit(16).unwrap();
+                        if accumn > 255 {
+                            ret.push(accum as u8);
+                            mode = 0;
+                            continue 'cnt;
+                        } else {
+                            accum = accumn;
+                        }
+                        continue 'st;
+                    }
+                    _ => {
+                        ret.push(accum as u8);
+                        mode = 0;
+                        continue 'cnt;
+                    }
+                },
+                _ => {
+                    mode = 0;
+                    continue 'cnt;
+                }
+            }
+            break;
+        }
+    }
+    ret
+}

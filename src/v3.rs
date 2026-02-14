@@ -271,10 +271,10 @@ impl std::str::FromStr for Security {
             let mut pp = Vec::<u8>::new();
             match kv[0] {
                 "user" | "username" | "login" => {
-                    ret.username = kv[1].as_bytes().to_vec();
+                    ret.username = crate::unescape_ascii(kv[1]);
                 }
                 "password" | "authentication_password" => {
-                    ret.authentication_password = kv[1].as_bytes().to_vec();
+                    ret.authentication_password = crate::unescape_ascii(kv[1]);
                 }
                 "authprotocol" | "AuthProtocol" | "authproto" => {
                     ret.auth_protocol = kv[1].parse()?;
@@ -309,7 +309,7 @@ impl std::str::FromStr for Security {
                     }
                 }
                 "privacy" | "privacy_password" => {
-                    pp = kv[1].as_bytes().to_vec();
+                    pp = crate::unescape_ascii(kv[1]);
                     match &mut ret.auth {
                         Auth::AuthPriv {
                             cipher: _,
