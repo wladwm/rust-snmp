@@ -2,35 +2,29 @@ use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr};
 use std::num::Wrapping;
 // use std::time::Duration;
 // use tokio::prelude::*;
-use crate::get_oid_array;
-use crate::pdu;
-use crate::SnmpError;
-use crate::SnmpMessageType;
-use crate::SnmpPdu;
-use crate::SnmpResult;
-use crate::Value;
+use crate::{
+    get_oid_array, pdu, SnmpCredentials, SnmpError, SnmpMessageType, SnmpPdu, SnmpResult,
+    SnmpSecurity, Value, BUFFER_SIZE,
+};
 use tokio::io;
 use tokio::net::{lookup_host, ToSocketAddrs, UdpSocket};
 //use std::fmt ;
 use tokio::time::{self, Duration};
-const BUFFER_SIZE: usize = 4096;
 
-/// Asynchronous SNMP client for Tokio , so that it can work with actix
+/// Simple asynchronous SNMP client for Tokio
 pub struct TokioSession {
     socket: UdpSocket,
-    community: Vec<u8>,
+    security: SnmpSecurity,
     req_id: Wrapping<i32>,
     send_pdu: pdu::Buf,
     recv_buf: [u8; BUFFER_SIZE],
-    version: i32,
 }
 
 impl TokioSession {
     pub async fn new<SA>(
         destination: SA,
-        community: &[u8],
+        credentials: SnmpCredentials,
         starting_req_id: i32,
-        version: i32,
     ) -> io::Result<Self>
     where
         SA: ToSocketAddrs,
@@ -46,11 +40,10 @@ impl TokioSession {
         socket.connect(destination).await?;
         Ok(Self {
             socket,
-            community: community.to_vec(),
+            security: credentials.into(),
             req_id: Wrapping(starting_req_id),
             send_pdu: pdu::Buf::default(),
             recv_buf: [0; BUFFER_SIZE],
-            version,
         })
     }
     pub fn last_req_id(&self) -> i32 {
@@ -59,8 +52,9 @@ impl TokioSession {
     pub fn set_last_req_id(&mut self, reqid: i32) {
         self.req_id.0 = reqid;
     }
+    /*
     pub fn snmp_version(&self) -> i32 {
-        self.version
+        self.security.version
     }
     pub fn set_snmp_version(&mut self, v: i32) -> SnmpResult<()> {
         if v == 1 || v == 2 {
@@ -81,7 +75,7 @@ impl TokioSession {
         self.community.as_mut_slice().copy_from_slice(community);
         Ok(())
     }
-
+    */
     async fn send_and_recv(
         socket: &mut UdpSocket,
         pdu: &pdu::Buf,
@@ -118,6 +112,52 @@ impl TokioSession {
             Ok(result) => result,
         }
     }
+    #[cfg(feature = "v3")]
+    async fn check_security(&mut self, timeout: Duration) -> SnmpResult<()> {
+        if self.security.credentials.version() == 3 {
+            if let SnmpCredentials::V3(sec) = &self.security.credentials {
+                if !self.security.state.need_init() {
+                    self.security.state.correct_authoritative_engine_time();
+                    return Ok(());
+                }
+                let req_id = self.req_id.0;
+                crate::v3::build_init(req_id, &mut self.send_pdu);
+                let recv_len = Self::send_and_recv_repeat(
+                    &mut self.socket,
+                    &self.send_pdu,
+                    &mut self.recv_buf[..],
+                    1,
+                    timeout,
+                )
+                .await?;
+                self.req_id += Wrapping(1);
+                let pdu_bytes = &self.recv_buf[..recv_len];
+                crate::v3::parse_init_report(pdu_bytes, sec, &mut self.security.state)
+            } else {
+                Ok(())
+            }
+        } else {
+            Ok(())
+        }
+    }
+
+    fn getpdu<'slf>(&'slf mut self, buflen: usize) -> SnmpResult<SnmpPdu<'slf>> {
+        let pdu_bytes = &self.recv_buf[..buflen];
+        let resp;
+        #[cfg(feature = "v3")]
+        {
+            resp = SnmpPdu::from_bytes_with_security(
+                pdu_bytes,
+                self.security.credentials.v3(),
+                Some(&mut self.security.state),
+            )?;
+        }
+        #[cfg(not(feature = "v3"))]
+        {
+            resp = SnmpPdu::from_bytes(pdu_bytes)?;
+        }
+        Ok(resp)
+    }
 
     pub async fn get_oid(
         &mut self,
@@ -129,20 +169,16 @@ impl TokioSession {
             .await
     }
 
-    pub async fn get(
+    pub async fn get<OBJNM: crate::VarbindOid>(
         &mut self,
-        name: &[u32],
+        name: OBJNM,
         repeat: u32,
         timeout: Duration,
     ) -> SnmpResult<SnmpPdu<'_>> {
+        #[cfg(feature = "v3")]
+        self.check_security(timeout).await?;
         let req_id = self.req_id.0;
-        pdu::build_get(
-            self.community.as_slice(),
-            req_id,
-            name,
-            &mut self.send_pdu,
-            self.version,
-        );
+        pdu::build_get(&self.security, req_id, name, &mut self.send_pdu)?;
         let recv_len = Self::send_and_recv_repeat(
             &mut self.socket,
             &self.send_pdu,
@@ -152,33 +188,36 @@ impl TokioSession {
         )
         .await?;
         self.req_id += Wrapping(1);
-        let pdu_bytes = &self.recv_buf[..recv_len];
-        let resp = SnmpPdu::from_bytes(pdu_bytes)?;
+        let resp = self.getpdu(recv_len)?;
         if resp.message_type != SnmpMessageType::Response {
             return Err(SnmpError::AsnWrongType);
         }
         if resp.req_id != req_id {
             return Err(SnmpError::RequestIdMismatch);
         }
+        /*
         if resp.community != &self.community[..] {
             return Err(SnmpError::CommunityMismatch);
         }
+        */
         Ok(resp)
     }
-    pub async fn getmulti(
+    pub async fn getmulti<NAMES, ITMB, ITM>(
         &mut self,
-        names: &[&[u32]],
+        names: NAMES,
         repeat: u32,
         timeout: Duration,
-    ) -> SnmpResult<SnmpPdu<'_>> {
+    ) -> SnmpResult<SnmpPdu<'_>>
+    where
+        NAMES: std::iter::IntoIterator<Item = ITMB> + Copy,
+        NAMES::IntoIter: DoubleEndedIterator,
+        ITMB: std::ops::Deref<Target = ITM>,
+        ITM: crate::VarbindOid,
+    {
+        #[cfg(feature = "v3")]
+        self.check_security(timeout).await?;
         let req_id = self.req_id.0;
-        pdu::build_getmulti(
-            self.community.as_slice(),
-            req_id,
-            names,
-            &mut self.send_pdu,
-            self.version,
-        );
+        pdu::build_getmulti(&self.security, req_id, names, &mut self.send_pdu)?;
         let recv_len = Self::send_and_recv_repeat(
             &mut self.socket,
             &self.send_pdu,
@@ -188,17 +227,18 @@ impl TokioSession {
         )
         .await?;
         self.req_id += Wrapping(1);
-        let pdu_bytes = &self.recv_buf[..recv_len];
-        let resp = SnmpPdu::from_bytes(pdu_bytes)?;
+        let resp = self.getpdu(recv_len)?;
         if resp.message_type != SnmpMessageType::Response {
             return Err(SnmpError::AsnWrongType);
         }
         if resp.req_id != req_id {
             return Err(SnmpError::RequestIdMismatch);
         }
+        /*
         if resp.community != &self.community[..] {
             return Err(SnmpError::CommunityMismatch);
         }
+        */
         Ok(resp)
     }
     pub async fn get_oid_next(
@@ -210,20 +250,19 @@ impl TokioSession {
         self.getnext(get_oid_array(oid).as_slice(), repeat, timeout)
             .await
     }
-    pub async fn getnext(
+    pub async fn getnext<ITM>(
         &mut self,
-        name: &[u32],
+        name: ITM,
         repeat: u32,
         timeout: Duration,
-    ) -> SnmpResult<SnmpPdu<'_>> {
+    ) -> SnmpResult<SnmpPdu<'_>>
+    where
+        ITM: crate::VarbindOid,
+    {
+        #[cfg(feature = "v3")]
+        self.check_security(timeout).await?;
         let req_id = self.req_id.0;
-        pdu::build_getnext(
-            self.community.as_slice(),
-            req_id,
-            name,
-            &mut self.send_pdu,
-            self.version,
-        );
+        pdu::build_getnext(&self.security, req_id, name, &mut self.send_pdu)?;
         let recv_len = Self::send_and_recv_repeat(
             &mut self.socket,
             &self.send_pdu,
@@ -233,37 +272,46 @@ impl TokioSession {
         )
         .await?;
         self.req_id += Wrapping(1);
-        let pdu_bytes = &self.recv_buf[..recv_len];
-        let resp = SnmpPdu::from_bytes(pdu_bytes)?;
+        let resp = self.getpdu(recv_len)?;
         if resp.message_type != SnmpMessageType::Response {
             return Err(SnmpError::AsnWrongType);
         }
         if resp.req_id != req_id {
             return Err(SnmpError::RequestIdMismatch);
         }
+        /*
         if resp.community != &self.community[..] {
             return Err(SnmpError::CommunityMismatch);
         }
+        */
         Ok(resp)
     }
 
-    pub async fn getbulk(
+    pub async fn getbulk<NAMES, ITMB, ITM>(
         &mut self,
-        names: &[&[u32]],
+        names: NAMES,
         non_repeaters: u32,
         max_repetitions: u32,
         repeat: u32,
         timeout: Duration,
-    ) -> SnmpResult<SnmpPdu<'_>> {
+    ) -> SnmpResult<SnmpPdu<'_>>
+    where
+        NAMES: std::iter::IntoIterator<Item = ITMB> + Copy,
+        NAMES::IntoIter: DoubleEndedIterator,
+        ITMB: std::ops::Deref<Target = ITM>,
+        ITM: crate::VarbindOid,
+    {
+        #[cfg(feature = "v3")]
+        self.check_security(timeout).await?;
         let req_id = self.req_id.0;
         pdu::build_getbulk(
-            self.community.as_slice(),
+            &self.security,
             req_id,
             names,
             non_repeaters,
             max_repetitions,
             &mut self.send_pdu,
-        );
+        )?;
         let recv_len = Self::send_and_recv_repeat(
             &mut self.socket,
             &self.send_pdu,
@@ -273,17 +321,18 @@ impl TokioSession {
         )
         .await?;
         self.req_id += Wrapping(1);
-        let pdu_bytes = &self.recv_buf[..recv_len];
-        let resp = SnmpPdu::from_bytes(pdu_bytes)?;
+        let resp = self.getpdu(recv_len)?;
         if resp.message_type != SnmpMessageType::Response {
             return Err(SnmpError::AsnWrongType);
         }
         if resp.req_id != req_id {
             return Err(SnmpError::RequestIdMismatch);
         }
+        /*
         if resp.community != &self.community[..] {
             return Err(SnmpError::CommunityMismatch);
         }
+        */
         Ok(resp)
     }
 
@@ -305,14 +354,10 @@ impl TokioSession {
         repeat: u32,
         timeout: Duration,
     ) -> SnmpResult<SnmpPdu<'_>> {
+        #[cfg(feature = "v3")]
+        self.check_security(timeout).await?;
         let req_id = self.req_id.0;
-        pdu::build_set(
-            self.community.as_slice(),
-            req_id,
-            values,
-            &mut self.send_pdu,
-            self.version,
-        );
+        pdu::build_set_oids(&self.security, req_id, values, &mut self.send_pdu)?;
         let recv_len = Self::send_and_recv_repeat(
             &mut self.socket,
             &self.send_pdu,
@@ -322,17 +367,18 @@ impl TokioSession {
         )
         .await?;
         self.req_id += Wrapping(1);
-        let pdu_bytes = &self.recv_buf[..recv_len];
-        let resp = SnmpPdu::from_bytes(pdu_bytes)?;
+        let resp = self.getpdu(recv_len)?;
         if resp.message_type != SnmpMessageType::Response {
             return Err(SnmpError::AsnWrongType);
         }
         if resp.req_id != req_id {
             return Err(SnmpError::RequestIdMismatch);
         }
+        /*
         if resp.community != &self.community[..] {
             return Err(SnmpError::CommunityMismatch);
         }
+        */
         Ok(resp)
     }
 }

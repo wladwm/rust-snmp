@@ -1,9 +1,10 @@
 use crate::{
-    asn1, get_oid_array, pdu, AsnReader, ObjectIdentifier, SnmpError, SnmpMessageType, SnmpResult,
-    Value, Varbinds,
+    asn1, get_oid_array, pdu, AsnReader, ObjectIdentifier, SnmpCredentials, SnmpError,
+    SnmpMessageType, SnmpResult, SnmpSecurity, Value, VarbindOid, Varbinds,
 };
 
 use std::collections::BTreeMap;
+use std::convert::TryFrom;
 use std::net::SocketAddr;
 use std::num::Wrapping;
 use std::sync::Arc;
@@ -15,7 +16,7 @@ use tokio::time::{self, Duration};
 const BUFFER_SIZE: usize = 4096;
 
 #[derive(Debug, Clone)]
-pub struct SNMPResponse {
+pub struct SNMPOwnedPdu {
     pub varbind_bytes: Vec<u8>,
     pub version: i64,
     pub community: Vec<u8>,
@@ -25,9 +26,9 @@ pub struct SNMPResponse {
     pub error_index: u32,
     //pub varbinds: crate::Varbinds<'a>,
 }
-impl SNMPResponse {
-    pub fn from_vec(bytes: Vec<u8>) -> SnmpResult<SNMPResponse> {
-        let seq = AsnReader::from_bytes(&bytes).read_raw(asn1::TYPE_SEQUENCE)?;
+impl SNMPOwnedPdu {
+    pub fn from_bytes(bytes: &[u8]) -> SnmpResult<SNMPOwnedPdu> {
+        let seq = AsnReader::from_bytes(bytes).read_raw(asn1::TYPE_SEQUENCE)?;
         let mut rdr = AsnReader::from_bytes(seq);
         let version = rdr.read_asn_integer()?;
         if version > 1 || version < 0 {
@@ -56,7 +57,7 @@ impl SNMPResponse {
 
         let varbind_bytes = response_pdu.read_raw(asn1::TYPE_SEQUENCE)?.to_vec();
 
-        Ok(SNMPResponse {
+        Ok(SNMPOwnedPdu {
             varbind_bytes,
             version,
             community,
@@ -73,7 +74,21 @@ impl SNMPResponse {
         Varbinds::from_bytes(&self.varbind_bytes).find(|v| v.0.eq(oid))
     }
 }
-
+impl std::convert::TryFrom<crate::SnmpPdu<'_>> for SNMPOwnedPdu {
+    type Error = SnmpError;
+    fn try_from(value: crate::SnmpPdu<'_>) -> Result<Self, Self::Error> {
+        let varbind_bytes = value.varbinds.inner.as_ref().to_vec();
+        Ok(SNMPOwnedPdu {
+            varbind_bytes,
+            version: value.version,
+            community: value.community.to_vec(),
+            message_type: value.message_type,
+            req_id: value.req_id,
+            error_status: value.error_status,
+            error_index: value.error_index,
+        })
+    }
+}
 struct LimitBasket {
     last: tokio::sync::Mutex<(Instant, usize)>,
     limit_pps: std::sync::atomic::AtomicUsize,
@@ -155,12 +170,11 @@ impl SocketLimit {
 }
 pub struct SNMPSession {
     socket: Arc<SocketLimit>,
-    community: Vec<u8>,
+    security: Arc<std::sync::RwLock<SnmpSecurity>>,
     req_id: Wrapping<i32>,
-    version: i32,
     pub host: SocketAddr,
     need_reqid: Arc<std::sync::atomic::AtomicI32>,
-    rx: Receiver<SNMPResponse>,
+    rx: Receiver<SNMPOwnedPdu>,
     send_pdu: pdu::Buf,
 }
 impl SNMPSession {
@@ -176,6 +190,7 @@ impl SNMPSession {
     pub fn set_last_req_id(&mut self, reqid: i32) {
         self.req_id.0 = reqid;
     }
+    /*
     pub fn snmp_version(&self) -> i32 {
         self.version
     }
@@ -198,11 +213,12 @@ impl SNMPSession {
         self.community.as_mut_slice().copy_from_slice(community);
         Ok(())
     }
+    */
     pub async fn set_send_limit(&self, limit_pps: usize) {
         self.socket.set_send_limit(limit_pps).await;
     }
-    async fn send_and_recv_timeout(&mut self, timeout: Duration) -> SnmpResult<SNMPResponse> {
-        while self.rx.try_recv().is_ok() {};
+    async fn send_and_recv_timeout(&mut self, timeout: Duration) -> SnmpResult<SNMPOwnedPdu> {
+        while self.rx.try_recv().is_ok() {}
         let _sent_bytes = match self.socket.send_to(&self.send_pdu[..], self.host).await {
             Err(e) => {
                 return Err(SnmpError::SendError(format!("{}", e)));
@@ -221,7 +237,7 @@ impl SNMPSession {
         &mut self,
         repeat: u32,
         timeout: Duration,
-    ) -> SnmpResult<SNMPResponse> {
+    ) -> SnmpResult<SNMPOwnedPdu> {
         for _ in 1..repeat {
             match self.send_and_recv_timeout(timeout).await {
                 Err(e) => match e {
@@ -234,7 +250,37 @@ impl SNMPSession {
         }
         self.send_and_recv_timeout(timeout).await
     }
-    async fn send_and_get(&mut self, repeat: u32, timeout: Duration) -> SnmpResult<SNMPResponse> {
+    #[cfg(feature = "v3")]
+    async fn check_security(&mut self, timeout: Duration) -> SnmpResult<()> {
+        if self.security.read().unwrap().credentials.version() == 3 {
+            {
+                let mut swg = self.security.write().unwrap();
+                if !(*swg).state.need_init() {
+                    (*swg).state.correct_authoritative_engine_time();
+                    return Ok(());
+                }
+                crate::v3::build_init(self.req_id.0, &mut self.send_pdu);
+            }
+            let resp = self.send_and_recv_repeat(1, timeout).await?;
+            self.req_id += Wrapping(1);
+            let mut swg = self.security.write().unwrap();
+            if let SnmpSecurity {
+                credentials: SnmpCredentials::V3(v3),
+                state,
+            } = &mut (*swg)
+            {
+                crate::v3::parse_init_report(&resp.varbind_bytes, v3, state)
+            } else {
+                Err(SnmpError::AuthFailure(
+                    crate::v3::AuthErrorKind::UnsupportedUSM,
+                ))
+            }
+        } else {
+            Ok(())
+        }
+    }
+
+    async fn send_and_get(&mut self, repeat: u32, timeout: Duration) -> SnmpResult<SNMPOwnedPdu> {
         let req_id = self.req_id.0;
         self.need_reqid
             .store(req_id, std::sync::atomic::Ordering::Relaxed);
@@ -246,9 +292,6 @@ impl SNMPSession {
         if rpdu.req_id != req_id {
             return Err(SnmpError::RequestIdMismatch);
         }
-        if rpdu.community != &self.community[..] {
-            return Err(SnmpError::CommunityMismatch);
-        }
         Ok(rpdu)
     }
     pub async fn get(
@@ -256,72 +299,83 @@ impl SNMPSession {
         name: &[u32],
         repeat: u32,
         timeout: Duration,
-    ) -> SnmpResult<SNMPResponse> {
+    ) -> SnmpResult<SNMPOwnedPdu> {
+        #[cfg(feature = "v3")]
+        self.check_security(timeout).await?;
         pdu::build_get(
-            self.community.as_slice(),
+            &self.security.read().unwrap(),
             self.req_id.0,
             name,
             &mut self.send_pdu,
-            self.version,
-        );
+        )?;
         self.send_and_get(repeat, timeout).await
     }
-    pub async fn getmulti<NAMES,OBJNM>(
+    pub async fn getmulti<NAMES, ITMB, ITM>(
         &mut self,
-        names: NAMES,//&[&[u32]],
+        names: NAMES,
         repeat: u32,
         timeout: Duration,
-    ) -> SnmpResult<SNMPResponse> where 
-        NAMES: std::iter::IntoIterator<Item=OBJNM>+Copy,
+    ) -> SnmpResult<SNMPOwnedPdu>
+    where
+        NAMES: std::iter::IntoIterator<Item = ITMB> + Copy,
         NAMES::IntoIter: DoubleEndedIterator,
-        OBJNM: AsRef<[u32]>
+        ITMB: std::ops::Deref<Target = ITM>,
+        ITM: VarbindOid,
     {
+        #[cfg(feature = "v3")]
+        self.check_security(timeout).await?;
         pdu::build_getmulti(
-            self.community.as_slice(),
+            &self.security.read().unwrap(),
             self.req_id.0,
             names,
             &mut self.send_pdu,
-            self.version,
-        );
+        )?;
         self.send_and_get(repeat, timeout).await
     }
-    pub async fn getnext(
+    pub async fn getnext<ITM>(
         &mut self,
-        name: &[u32],
+        name: ITM,
         repeat: u32,
         timeout: Duration,
-    ) -> SnmpResult<SNMPResponse> {
+    ) -> SnmpResult<SNMPOwnedPdu>
+    where
+        ITM: crate::VarbindOid,
+    {
+        #[cfg(feature = "v3")]
+        self.check_security(timeout).await?;
         pdu::build_getnext(
-            self.community.as_slice(),
+            &self.security.read().unwrap(),
             self.req_id.0,
             name,
             &mut self.send_pdu,
-            self.version,
-        );
+        )?;
         self.send_and_get(repeat, timeout).await
     }
 
-    pub async fn getbulk<NAMES,OBJNM>(
+    pub async fn getbulk<NAMES, ITMB, ITM>(
         &mut self,
         names: NAMES,
         non_repeaters: u32,
         max_repetitions: u32,
         repeat: u32,
         timeout: Duration,
-    ) -> SnmpResult<SNMPResponse> 
-    where 
-        NAMES: std::iter::IntoIterator<Item=OBJNM>+Copy,
+    ) -> SnmpResult<SNMPOwnedPdu>
+    where
+        NAMES: std::iter::IntoIterator<Item = ITMB> + Copy,
         NAMES::IntoIter: DoubleEndedIterator,
-        OBJNM: AsRef<[u32]>
+        ITMB: std::ops::Deref<Target = ITM>,
+        ITM: crate::VarbindOid,
     {
+        #[cfg(feature = "v3")]
+        self.check_security(timeout).await?;
         pdu::build_getbulk(
-            self.community.as_slice(),
+            &self.security.read().unwrap(),
             self.req_id.0,
             names,
             non_repeaters,
             max_repetitions,
             &mut self.send_pdu,
-        );
+        )?;
         self.send_and_get(repeat, timeout).await
     }
 
@@ -337,25 +391,26 @@ impl SNMPSession {
     ///   - `Timeticks`
     ///   - `Opaque`
     ///   - `Counter64`
-    pub async fn set<'c,'b:'c,VLS,OBJNM,VL>(
+    pub async fn set<NAMES, ITMB, ITM>(
         &mut self,
-        values: VLS, //&[(&[u32], Value<'_>)],
+        values: NAMES, //&[(&[u32], Value<'_>)],
         repeat: u32,
         timeout: Duration,
-    ) -> SnmpResult<SNMPResponse>
-    where 
-        VLS: std::iter::IntoIterator<Item=&'c (OBJNM, VL)>+Copy,
-        VLS::IntoIter: DoubleEndedIterator,
-        OBJNM: std::ops::Deref<Target=[u32]>+'c,
-        VL: Into<Value<'b>>+Copy+'c
+    ) -> SnmpResult<SNMPOwnedPdu>
+    where
+        NAMES: std::iter::IntoIterator<Item = ITMB> + Copy,
+        NAMES::IntoIter: DoubleEndedIterator,
+        ITMB: std::ops::Deref<Target = ITM>,
+        ITM: crate::VarbindOid,
     {
-        pdu::build_set(
-            self.community.as_slice(),
+        #[cfg(feature = "v3")]
+        self.check_security(timeout).await?;
+        pdu::build_set_oids(
+            &self.security.read().unwrap(),
             self.req_id.0,
             values,
             &mut self.send_pdu,
-            self.version,
-        );
+        )?;
         self.send_and_get(repeat, timeout).await
     }
     pub async fn get_oid(
@@ -363,7 +418,7 @@ impl SNMPSession {
         oid: &str,
         repeat: u32,
         timeout: Duration,
-    ) -> SnmpResult<SNMPResponse> {
+    ) -> SnmpResult<SNMPOwnedPdu> {
         self.get(get_oid_array(oid).as_slice(), repeat, timeout)
             .await
     }
@@ -372,7 +427,7 @@ impl SNMPSession {
         oid: &str,
         repeat: u32,
         timeout: Duration,
-    ) -> SnmpResult<SNMPResponse> {
+    ) -> SnmpResult<SNMPOwnedPdu> {
         self.getnext(get_oid_array(oid).as_slice(), repeat, timeout)
             .await
     }
@@ -380,14 +435,61 @@ impl SNMPSession {
 
 struct SNMPSessionBack {
     reqid: Arc<std::sync::atomic::AtomicI32>,
-    txresp: Sender<SNMPResponse>,
+    txresp: Sender<SNMPOwnedPdu>,
+    security: Arc<std::sync::RwLock<SnmpSecurity>>,
 }
 impl SNMPSessionBack {
     fn new(
         reqid: Arc<std::sync::atomic::AtomicI32>,
-        txresp: Sender<SNMPResponse>,
+        txresp: Sender<SNMPOwnedPdu>,
+        security: Arc<std::sync::RwLock<SnmpSecurity>>,
     ) -> SNMPSessionBack {
-        SNMPSessionBack { reqid, txresp }
+        SNMPSessionBack {
+            reqid,
+            txresp,
+            security,
+        }
+    }
+    #[cfg(feature = "v3")]
+    fn send_response(&self, buf: &[u8]) -> SnmpResult<()> {
+        let mut sec = self.security.write().unwrap();
+        if (*sec).credentials.version() == 3 {
+            if (*sec).state.need_init() {
+                let resp = SNMPOwnedPdu {
+                    varbind_bytes: buf.to_vec(),
+                    version: 3,
+                    community: Vec::new(),
+                    message_type: SnmpMessageType::Report,
+                    req_id: 0,
+                    error_status: 0,
+                    error_index: 0,
+                };
+                return self
+                    .txresp
+                    .try_send(resp)
+                    .map_err(|_| SnmpError::ChannelOverflow);
+            }
+        }
+        let pdu;
+        if let SnmpSecurity {
+            credentials: SnmpCredentials::V3(v3),
+            state,
+        } = &mut (*sec)
+        {
+            pdu = crate::SnmpPdu::from_bytes_with_security(buf, Some(v3), Some(state))?
+        } else {
+            return Err(SnmpError::AuthFailure(
+                crate::v3::AuthErrorKind::UnsupportedUSM,
+            ));
+        }
+        if pdu.req_id != self.reqid.load(std::sync::atomic::Ordering::Relaxed) {
+            return Ok(());
+        }
+        let resp = SNMPOwnedPdu::try_from(pdu)?;
+        self.txresp
+            .try_send(resp)
+            .map_err(|_| SnmpError::ChannelOverflow)?;
+        Ok(())
     }
 }
 enum SNMPSessionBacks {
@@ -397,12 +499,12 @@ enum SNMPSessionBacks {
 impl SNMPSessionBacks {
     fn new(
         reqid: Arc<std::sync::atomic::AtomicI32>,
-        txresp: Sender<SNMPResponse>,
+        txresp: Sender<SNMPOwnedPdu>,
+        security: Arc<std::sync::RwLock<SnmpSecurity>>,
     ) -> SNMPSessionBacks {
-        SNMPSessionBacks::Few(SNMPSessionBack::new(reqid, txresp))
+        SNMPSessionBacks::Few(SNMPSessionBack::new(reqid, txresp, security))
     }
-    fn push(&mut self, reqid: Arc<std::sync::atomic::AtomicI32>, txresp: Sender<SNMPResponse>) {
-        let b = SNMPSessionBack::new(reqid, txresp);
+    fn push(&mut self, b: SNMPSessionBack) {
         if let SNMPSessionBacks::Many(m) = self {
             m.push(b);
             return;
@@ -449,6 +551,48 @@ impl SNMPSessionBacks {
                 if !f(o) {
                     *self = SNMPSessionBacks::Many(Vec::new());
                 }
+            }
+        }
+    }
+    fn send_response(&self, buf: &[u8]) -> SnmpResult<()> {
+        let rsp = match SNMPOwnedPdu::from_bytes(buf) {
+            Ok(r) => r,
+            Err(e) => {
+                #[cfg(not(feature = "v3"))]
+                return Err(e);
+                #[cfg(feature = "v3")]
+                {
+                    if e != SnmpError::UnsupportedVersion {
+                        return Err(e);
+                    }
+                    // v3
+                    if self.len() == 1 {
+                        let c = self.iter().next().unwrap();
+                        c.send_response(buf)?;
+                    } else {
+                        for c in self.iter() {
+                            c.send_response(buf)?;
+                        }
+                    }
+                    return Ok(());
+                }
+            }
+        };
+        if self.len() == 1 {
+            let c = self.iter().next().unwrap();
+            c.txresp
+                .try_send(rsp)
+                .map_err(|_| SnmpError::ChannelOverflow)
+        } else {
+            match self
+                .iter()
+                .find(|c| c.reqid.load(std::sync::atomic::Ordering::Relaxed) == rsp.req_id)
+            {
+                Some(c) => c
+                    .txresp
+                    .try_send(rsp)
+                    .map_err(|_| SnmpError::ChannelOverflow),
+                None => return Ok(()), //Err(tokio::sync::mpsc::error::TrySendError::Closed(rsp)),
             }
         }
     }
@@ -503,27 +647,7 @@ impl SNMPSocketInner {
                 warn!("Unknown host {:?} - {} bytes received from", addr, len);
                 return Ok(());
             }
-            Some(clts) => {
-                let rsp = match SNMPResponse::from_vec(buf[0..len].to_vec()) {
-                    Ok(r) => r,
-                    Err(e) => {
-                        warn!("Snmp error {:?} from {} len {}", e, addr, len);
-                        return Ok(());
-                    }
-                };
-                if clts.len() == 1 {
-                    let c = clts.iter().next().unwrap();
-                    c.txresp.try_send(rsp)
-                } else {
-                    match clts
-                        .iter()
-                        .find(|c| c.reqid.load(std::sync::atomic::Ordering::Relaxed) == rsp.req_id)
-                    {
-                        Some(c) => c.txresp.try_send(rsp),
-                        None => return Ok(()), //Err(tokio::sync::mpsc::error::TrySendError::Closed(rsp)),
-                    }
-                }
-            }
+            Some(clts) => clts.send_response(&buf[..len]),
         };
         if let Err(e) = res {
             warn!("Warning: SNMP error pass response to {}: {}", addr, e);
@@ -561,9 +685,8 @@ impl SNMPSocket {
     pub async fn session<SA: ToSocketAddrs>(
         &self,
         hostaddr: SA,
-        community: &[u8],
+        credentials: SnmpCredentials,
         mut starting_req_id: i32,
-        version: i32,
     ) -> std::io::Result<SNMPSession> {
         let la = self.inner.socket.local_addr()?;
         let socketaddr = match lookup_host(&hostaddr)
@@ -581,14 +704,20 @@ impl SNMPSocket {
         let mut sess = self.inner.sessions.write().unwrap();
         let (tx, rx) = channel(100);
         let nreqid = Arc::new(std::sync::atomic::AtomicI32::new(0));
+        let security = Arc::new(std::sync::RwLock::new(SnmpSecurity::from(credentials)));
         if sess.get(&socketaddr).is_none() {
-            sess.insert(socketaddr, SNMPSessionBacks::new(nreqid.clone(), tx));
+            sess.insert(
+                socketaddr,
+                SNMPSessionBacks::new(nreqid.clone(), tx, security.clone()),
+            );
         } else {
             let lng = sess.get(&socketaddr).unwrap().len();
             if starting_req_id < 2 && lng > 0 {
                 starting_req_id = (lng * 100) as i32;
             };
-            sess.get_mut(&socketaddr).unwrap().push(nreqid.clone(), tx);
+            sess.get_mut(&socketaddr)
+                .unwrap()
+                .push(SNMPSessionBack::new(nreqid.clone(), tx, security.clone()));
         }
         {
             let recv_task = self.recv_task.clone();
@@ -603,10 +732,9 @@ impl SNMPSocket {
         }
         Ok(SNMPSession {
             socket: self.inner.socket.clone(),
-            community: community.to_vec(),
+            security,
             req_id: Wrapping(starting_req_id),
             need_reqid: nreqid,
-            version,
             host: socketaddr,
             rx,
             send_pdu: pdu::Buf::default(),

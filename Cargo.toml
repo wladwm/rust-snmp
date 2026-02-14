@@ -1,7 +1,7 @@
 [package]
 name = "snmp"
-version = "0.2.4"
-authors = ["Hroi Sigurdsson <hroi@asdf.dk>"]
+version = "0.3.0"
+authors = ["Vladimir Melnikov <wlad.w.m@gmail.com>","Hroi Sigurdsson <hroi@asdf.dk>"]
 description = "SNMP client library"
 license = "MIT/Apache-2.0"
 repository = "https://github.com/hroi/rust-snmp"
@@ -11,14 +11,21 @@ keywords = ["networking", "snmp", "monitoring"]
 edition = "2018"
 
 [features]
-default = ["stream"]
+default = []
 stream = ["futures","futures-util"]
+sync = []
+async = ["tokio","tokio-util"]
+v3 = ["openssl"]
 
 [dependencies]
-tokio = { version="1", features = ["net","macros"] }
-tokio-test = "0.4" 
-tokio-util = { version = "0", features = [ "codec" ] }
+tokio = { version="1", features = ["net","macros"], optional = true }
+tokio-test = { version = "0.4", optional = true} 
+tokio-util = { version = "0", features = [ "codec" ] , optional = true }
 serde = { version = "1", features = ["derive"] }
 futures = { version="0", optional = true }
 futures-util = { version="0", optional = true }
 log = "0"
+openssl = { version = "0.10", optional = true }
+
+[dev-dependencies]
+tokio = { version="1", features = ["full"] }

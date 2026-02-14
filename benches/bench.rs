@@ -22,13 +22,15 @@ const IF_HCOUTUCASTPKTS: &'static [u32] = &[1, 3, 6, 1, 2, 1, 31, 1, 1, 1, 11, I
 #[bench]
 fn pdu_getnext(b: &mut test::Bencher) {
     let mut buf = snmp::pdu::Buf::default();
-    b.iter(|| snmp::pdu::build_getnext(b"tyS0n43d", 0, &[1, 3, 6, 1, 2, 1, 1, 1, 0], &mut buf, 2));
+    let security = snmp::SnmpSecurity::from_bytes(2, b"tyS0n43d");
+    b.iter(|| snmp::pdu::build_getnext(&security, 0, [1u32, 3, 6, 1, 2, 1, 1, 1, 0], &mut buf));
 }
 
 #[bench]
 fn pdu_getbulk(b: &mut test::Bencher) {
     let mut buf = snmp::pdu::Buf::default();
-    b.iter(|| snmp::pdu::build_getbulk(b"tyS0n43d", 0, BULK_NAMES, 3, 10, &mut buf));
+    let security = snmp::SnmpSecurity::from_bytes(2, b"tyS0n43d");
+    b.iter(|| snmp::pdu::build_getbulk(&security, 0, BULK_NAMES, 3, 10, &mut buf));
 }
 
 #[bench]

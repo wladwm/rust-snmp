@@ -44,11 +44,11 @@ impl<'a, 'b> SnmpWalkInner<'a, 'b> {
             reqnext: walkoid.to_vec(),
         }
     }
-    async fn getnext(self) -> Result<(SNMPResponse, SnmpWalkInner<'a, 'b>), SnmpError> {
+    async fn getnext(self) -> Result<(SNMPOwnedPdu, SnmpWalkInner<'a, 'b>), SnmpError> {
         let rsp = match if self.params.bulk > 1 {
             self.sess
                 .getbulk(
-                    &[&self.reqnext],
+                    &[&self.reqnext[..]],
                     0,
                     self.params.bulk,
                     self.params.tries,
@@ -57,7 +57,11 @@ impl<'a, 'b> SnmpWalkInner<'a, 'b> {
                 .await
         } else {
             self.sess
-                .getnext(&self.reqnext, self.params.tries, self.params.timeout)
+                .getnext(
+                    self.reqnext.as_slice(),
+                    self.params.tries,
+                    self.params.timeout,
+                )
                 .await
         } {
             Err(e) => return Err(e),
@@ -72,25 +76,25 @@ unsafe impl<'a, 'b> Send for SnmpWalkInner<'a, 'b> {}
 #[must_use = "futures do nothing unless you `.await` or poll them"]
 pub struct SnmpWalk<'a: 'c, 'b: 'c, 'c, F, T>
 where
-    F: Fn(ObjectIdentifier, Value, &SNMPResponse) -> Option<T>,
+    F: Fn(ObjectIdentifier, Value, &SNMPOwnedPdu) -> Option<T>,
 {
     inner: Option<SnmpWalkInner<'a, 'b>>,
-    rsp: Option<SNMPResponse>,
+    rsp: Option<SNMPOwnedPdu>,
     pos: usize,
-    futget: Option<BoxFuture<'c, Result<(SNMPResponse, SnmpWalkInner<'a, 'b>), SnmpError>>>,
+    futget: Option<BoxFuture<'c, Result<(SNMPOwnedPdu, SnmpWalkInner<'a, 'b>), SnmpError>>>,
     func: F,
 }
 impl<'a, 'b, 'c, F, T> Unpin for SnmpWalk<'a, 'b, 'c, F, T> where
-    F: Fn(ObjectIdentifier, Value, &SNMPResponse) -> Option<T>
+    F: Fn(ObjectIdentifier, Value, &SNMPOwnedPdu) -> Option<T>
 {
 }
 unsafe impl<'a, 'b, 'c, F, T> Send for SnmpWalk<'a, 'b, 'c, F, T> where
-    F: Fn(ObjectIdentifier, Value, &SNMPResponse) -> Option<T>
+    F: Fn(ObjectIdentifier, Value, &SNMPOwnedPdu) -> Option<T>
 {
 }
 impl<'a: 'c, 'b: 'c, 'c, F, T> SnmpWalk<'a, 'b, 'c, F, T>
 where
-    F: Fn(ObjectIdentifier, Value, &SNMPResponse) -> Option<T>,
+    F: Fn(ObjectIdentifier, Value, &SNMPOwnedPdu) -> Option<T>,
 {
     pub fn new(
         sess: &'a mut SNMPSession,
@@ -112,7 +116,7 @@ where
 }
 impl<'a: 'c, 'b: 'c, 'c, F, T> Stream for SnmpWalk<'a, 'b, 'c, F, T>
 where
-    F: Fn(ObjectIdentifier, Value, &SNMPResponse) -> Option<T>,
+    F: Fn(ObjectIdentifier, Value, &SNMPOwnedPdu) -> Option<T>,
 {
     type Item = Result<T, SnmpError>;
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {
