@@ -1,5 +1,8 @@
 use crate::*;
 use std::net::UdpSocket;
+use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
+use std::num::Wrapping;
+use std::time::Duration;
 
 /// Synchronous SNMPv2 client.
 pub struct SyncSession {
@@ -16,7 +19,7 @@ impl SyncSession {
         creds: SnmpCredentials,
         timeout: Option<Duration>,
         starting_req_id: i32,
-    ) -> io::Result<Self>
+    ) -> SnmpResult<Self>
     where
         SA: ToSocketAddrs,
     {
@@ -148,16 +151,15 @@ impl SyncSession {
         }
         Ok(resp)
     }
-    pub fn getbulk<'slf, NAMES, ITMB, ITM>(
+    pub fn getbulk<'slf, NAMES, ITM>(
         &'slf mut self,
         names: NAMES,
         non_repeaters: u32,
         max_repetitions: u32,
     ) -> SnmpResult<SnmpPdu<'slf>>
     where
-        NAMES: std::iter::IntoIterator<Item = ITMB> + Copy,
+        NAMES: std::iter::IntoIterator<Item = ITM>,
         NAMES::IntoIter: DoubleEndedIterator,
-        ITMB: std::ops::Deref<Target = ITM>,
         ITM: crate::VarbindOid,
     {
         #[cfg(feature = "v3")]
@@ -203,7 +205,7 @@ impl SyncSession {
         #[cfg(feature = "v3")]
         self.check_security()?;
         let req_id = self.req_id.0;
-        pdu::build_set_oids(&self.security, req_id, values, &mut self.send_pdu)?;
+        pdu::build_set(&self.security, req_id, values, &mut self.send_pdu)?;
         let recv_len = Self::send_and_recv_repeat(
             &self.socket,
             &self.send_pdu,

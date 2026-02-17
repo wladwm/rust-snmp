@@ -97,12 +97,9 @@ extern crate log;
 use std::fmt;
 // use std::str::FromStr;
 use serde::{Deserialize, Serialize};
-use std::io;
+//use std::io;
 use std::mem;
-use std::net::{Ipv4Addr, Ipv6Addr, SocketAddr, ToSocketAddrs};
-use std::num::Wrapping;
 use std::ptr;
-use std::time::Duration;
 
 #[cfg(feature = "simpleasync")]
 pub mod tokio_session;
@@ -461,6 +458,14 @@ impl VarbindOid for &[u32] {
         None
     }
 }
+impl VarbindOid for &&[u32] {
+    fn oid<'a>(&'a self) -> &'a [u32] {
+        *self
+    }
+    fn value<'a>(&'a self) -> Option<&'a Value<'a>> {
+        None
+    }
+}
 impl VarbindOid for [u32] {
     fn oid<'a>(&'a self) -> &'a [u32] {
         self
@@ -493,7 +498,23 @@ impl<'v> VarbindOid for (&[u32], Value<'v>) {
         Some(&self.1)
     }
 }
+impl<'v> VarbindOid for &(&[u32], Value<'v>) {
+    fn oid<'a>(&'a self) -> &'a [u32] {
+        self.0
+    }
+    fn value<'a>(&'a self) -> Option<&'a Value<'a>> {
+        Some(&self.1)
+    }
+}
 impl<'v> VarbindOid for (Vec<u32>, Value<'v>) {
+    fn oid<'a>(&'a self) -> &'a [u32] {
+        &self.0
+    }
+    fn value<'a>(&'a self) -> Option<&'a Value<'a>> {
+        Some(&self.1)
+    }
+}
+impl<'v> VarbindOid for &(Vec<u32>, Value<'v>) {
     fn oid<'a>(&'a self) -> &'a [u32] {
         &self.0
     }
@@ -1411,6 +1432,12 @@ impl<'a> Varbinds<'a> {
 
     pub fn advance(&mut self, offset: usize) {
         self.inner.advance(offset)
+    }
+}
+
+impl<'a> AsRef<[u8]> for Varbinds<'a> {
+    fn as_ref(&self) -> &[u8] {
+        self.inner.as_ref()
     }
 }
 

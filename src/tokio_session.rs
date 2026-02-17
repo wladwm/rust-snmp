@@ -209,7 +209,7 @@ impl TokioSession {
         timeout: Duration,
     ) -> SnmpResult<SnmpPdu<'_>>
     where
-        NAMES: std::iter::IntoIterator<Item = ITMB> + Copy,
+        NAMES: std::iter::IntoIterator<Item = ITMB>,
         NAMES::IntoIter: DoubleEndedIterator,
         ITMB: std::ops::Deref<Target = ITM>,
         ITM: crate::VarbindOid,
@@ -296,7 +296,7 @@ impl TokioSession {
         timeout: Duration,
     ) -> SnmpResult<SnmpPdu<'_>>
     where
-        NAMES: std::iter::IntoIterator<Item = ITMB> + Copy,
+        NAMES: std::iter::IntoIterator<Item = ITMB>,
         NAMES::IntoIter: DoubleEndedIterator,
         ITMB: std::ops::Deref<Target = ITM>,
         ITM: crate::VarbindOid,

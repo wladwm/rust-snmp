@@ -8,7 +8,7 @@ repository = "https://github.com/hroi/rust-snmp"
 documentation = "https://docs.rs/crate/snmp"
 readme = "README.md"
 keywords = ["networking", "snmp", "monitoring"]
-edition = "2018"
+edition = "2021"
 
 [features]
 default = []

@@ -11,8 +11,8 @@ use crate::{
     asn1,
     pdu::{self, Buf},
     snmp::{self, V3_MSG_FLAGS_AUTH, V3_MSG_FLAGS_PRIVACY, V3_MSG_FLAGS_REPORTABLE, VERSION_3},
-    AsnReader, ObjectIdentifier, SnmpError, SnmpMessageType, SnmpPdu, SnmpResult, Value, Varbinds,
-    BUFFER_SIZE,
+    AsnReader, ObjectIdentifier, SnmpError, SnmpMessageType, SnmpPdu, SnmpResult, Value,
+    VarbindOid, Varbinds, BUFFER_SIZE,
 };
 
 const ENGINE_TIME_WINDOW: i64 = 150;
@@ -234,7 +234,7 @@ impl AuthoritativeState {
     }
 }
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, PartialOrd, Ord, Hash)]
 pub enum KeyExtension {
     Blumenthal,
     Reeder,
@@ -249,13 +249,71 @@ impl KeyExtension {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct Security {
     pub(crate) username: Vec<u8>,
     pub(crate) authentication_password: Vec<u8>,
     pub(crate) auth: Auth,
     pub(crate) auth_protocol: AuthProtocol,
     pub(crate) key_extension_method: Option<KeyExtension>,
+}
+impl std::cmp::PartialOrd for Security {
+    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+        match self.username.partial_cmp(&other.username) {
+            Some(std::cmp::Ordering::Equal) => {}
+            q => return q,
+        };
+        match self
+            .authentication_password
+            .partial_cmp(&other.authentication_password)
+        {
+            Some(std::cmp::Ordering::Equal) => {}
+            q => return q,
+        };
+        match self.auth_protocol.partial_cmp(&other.auth_protocol) {
+            Some(std::cmp::Ordering::Equal) => {}
+            q => return q,
+        };
+        match self.auth.partial_cmp(&other.auth) {
+            Some(std::cmp::Ordering::Equal) => {}
+            q => return q,
+        };
+        match (&self.key_extension_method, &other.key_extension_method) {
+            (None, None) => Some(std::cmp::Ordering::Equal),
+            (None, Some(_)) => Some(std::cmp::Ordering::Less),
+            (Some(_), None) => Some(std::cmp::Ordering::Greater),
+            (Some(s), Some(o)) => s.partial_cmp(o),
+        }
+    }
+}
+impl std::cmp::Ord for Security {
+    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+        match self.username.cmp(&other.username) {
+            std::cmp::Ordering::Equal => {}
+            q => return q,
+        };
+        match self
+            .authentication_password
+            .cmp(&other.authentication_password)
+        {
+            std::cmp::Ordering::Equal => {}
+            q => return q,
+        };
+        match self.auth_protocol.cmp(&other.auth_protocol) {
+            std::cmp::Ordering::Equal => {}
+            q => return q,
+        };
+        match self.auth.cmp(&other.auth) {
+            std::cmp::Ordering::Equal => {}
+            q => return q,
+        };
+        match (&self.key_extension_method, &other.key_extension_method) {
+            (None, None) => std::cmp::Ordering::Equal,
+            (None, Some(_)) => std::cmp::Ordering::Less,
+            (Some(_), None) => std::cmp::Ordering::Greater,
+            (Some(s), Some(o)) => s.cmp(o),
+        }
+    }
 }
 impl std::str::FromStr for Security {
     type Err = crate::SnmpError;
@@ -351,7 +409,7 @@ impl std::fmt::Display for Security {
             )?;
         }
         write!(f, "authproto={} ", self.auth_protocol)?;
-        match self.auth {
+        match &self.auth {
             Auth::NoAuthNoPriv => write!(f, "auth=NoAuthNoPriv")?,
             Auth::AuthNoPriv => write!(f, "auth=AuthNoPriv")?,
             Auth::AuthPriv {
@@ -404,9 +462,9 @@ impl Security {
     pub(crate) fn another_key_extension_method(&mut self) -> Option<KeyExtension> {
         if let Auth::AuthPriv { ref cipher, .. } = self.auth {
             if cipher.priv_key_needs_extension(&self.auth_protocol) {
-                if let Some(used_method) = self.key_extension_method {
+                if let Some(used_method) = self.key_extension_method.clone() {
                     self.key_extension_method = Some(used_method.other());
-                    return self.key_extension_method;
+                    return self.key_extension_method.clone();
                 }
             }
         }
@@ -733,7 +791,7 @@ impl SecurityState {
         }
     }
 }
-#[derive(Debug, Clone, Eq, PartialEq)]
+#[derive(Debug, Clone, Eq, PartialEq, PartialOrd, Ord, Hash)]
 pub enum Auth {
     NoAuthNoPriv,
     /// Authentication
@@ -745,7 +803,7 @@ pub enum Auth {
     },
 }
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, PartialOrd, Ord, Hash)]
 pub enum AuthProtocol {
     Md5,
     Sha1,
@@ -753,6 +811,19 @@ pub enum AuthProtocol {
     Sha256,
     Sha384,
     Sha512,
+}
+
+impl fmt::Display for AuthProtocol {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            AuthProtocol::Md5 => write!(f, "Md5"),
+            AuthProtocol::Sha1 => write!(f, "Sha1"),
+            AuthProtocol::Sha224 => write!(f, "Sha224"),
+            AuthProtocol::Sha256 => write!(f, "Sha256"),
+            AuthProtocol::Sha384 => write!(f, "Sha384"),
+            AuthProtocol::Sha512 => write!(f, "Sha512"),
+        }
+    }
 }
 
 impl AuthProtocol {
@@ -795,12 +866,23 @@ impl std::str::FromStr for AuthProtocol {
     }
 }
 
-#[derive(Debug, Copy, Clone, Eq, PartialEq)]
+#[derive(Debug, Copy, Clone, Eq, PartialEq, PartialOrd, Ord, Hash)]
 pub enum Cipher {
     Des,
     Aes128,
     Aes192,
     Aes256,
+}
+
+impl fmt::Display for Cipher {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Cipher::Des => write!(f, "Des"),
+            Cipher::Aes128 => write!(f, "Aes128"),
+            Cipher::Aes192 => write!(f, "Aes192"),
+            Cipher::Aes256 => write!(f, "Aes256"),
+        }
+    }
 }
 
 impl Cipher {
@@ -1243,7 +1325,7 @@ pub fn build_raw_v3(
     Ok(())
 }
 
-pub fn build_v3<VLS, ITMB, ITM>(
+pub fn build_v3<VLS, ITM>(
     ident: u8,
     req_id: i32,
     values: VLS,
@@ -1254,10 +1336,9 @@ pub fn build_v3<VLS, ITMB, ITM>(
     security_state: &SecurityState,
 ) -> SnmpResult<()>
 where
-    VLS: std::iter::IntoIterator<Item = ITMB> + std::clone::Clone,
+    VLS: std::iter::IntoIterator<Item = ITM>,
     VLS::IntoIter: DoubleEndedIterator,
-    ITMB: std::ops::Deref<Target = ITM>,
-    ITM: crate::VarbindOid,
+    ITM: VarbindOid,
 {
     let truncation_len = security.auth_protocol.truncation_length();
     buf.reset();
@@ -1273,62 +1354,74 @@ where
         flags |= V3_MSG_FLAGS_AUTH;
     }
 
-    let encrypted = if security_state.need_encrypt() {
+    if security_state.need_encrypt() {
         flags |= V3_MSG_FLAGS_PRIVACY;
         let mut pdu_buf = Buf::default();
         pdu_buf.push_sequence(|buf| {
-            pdu::build_inner_oid(
-                req_id,
-                ident,
-                values.clone(),
-                max_repetitions,
-                non_repeaters,
-                buf,
-            );
+            pdu::build_inner_oid(req_id, ident, values, max_repetitions, non_repeaters, buf);
             buf.push_octet_string(&[]);
             buf.push_octet_string(security_state.engine_id());
         });
         let (encrypted, salt) = security_state.encrypt(security, &pdu_buf)?;
         priv_params.extend_from_slice(&salt);
-        Some(encrypted)
+        buf.push_sequence(|buf| {
+            buf.push_octet_string(encrypted.as_ref());
+            let l0 = buf.len();
+            sec_buf_seq.push_sequence(|buf| {
+                buf.push_octet_string(&priv_params); // priv params
+                let l0 = buf.len() - priv_params.len();
+                buf.push_octet_string(&vec![0u8; truncation_len]); // auth params
+                let l1 = buf.len() - l0;
+                buf.push_octet_string(security.username()); // user name
+                buf.push_integer(security_state.engine_time()); // time
+                buf.push_integer(security_state.engine_boots()); // boots
+                buf.push_octet_string(security_state.engine_id()); // engine ID
+                auth_pos = buf.len() - l1;
+                sec_buf_len = buf.len();
+            });
+            buf.push_octet_string(&sec_buf_seq);
+            buf.push_sequence(|buf| {
+                buf.push_integer(3); // security_model
+                buf.push_octet_string(&[flags]); // flags
+                buf.push_integer(BUFFER_SIZE.try_into().unwrap()); // max_size
+                buf.push_integer(req_id.into()); // msg_id
+            });
+            buf.push_integer(3); // version
+            auth_pos = buf.len() - l0 - (sec_buf_len - auth_pos);
+            inner_len = buf.len();
+        });
     } else {
-        None
-    };
-
-    buf.push_sequence(|buf| {
-        if let Some(encrypted) = encrypted.as_ref() {
-            buf.push_octet_string(encrypted);
-        } else {
+        buf.push_sequence(|buf| {
             buf.push_sequence(|buf| {
                 pdu::build_inner_oid(req_id, ident, values, max_repetitions, non_repeaters, buf);
                 buf.push_octet_string(&[]);
                 buf.push_octet_string(security_state.engine_id());
             });
-        }
-        let l0 = buf.len();
-        sec_buf_seq.push_sequence(|buf| {
-            buf.push_octet_string(&priv_params); // priv params
-            let l0 = buf.len() - priv_params.len();
-            buf.push_octet_string(&vec![0u8; truncation_len]); // auth params
-            let l1 = buf.len() - l0;
-            buf.push_octet_string(security.username()); // user name
-            buf.push_integer(security_state.engine_time()); // time
-            buf.push_integer(security_state.engine_boots()); // boots
-            buf.push_octet_string(security_state.engine_id()); // engine ID
-            auth_pos = buf.len() - l1;
-            sec_buf_len = buf.len();
+            let l0 = buf.len();
+            sec_buf_seq.push_sequence(|buf| {
+                buf.push_octet_string(&priv_params); // priv params
+                let l0 = buf.len() - priv_params.len();
+                buf.push_octet_string(&vec![0u8; truncation_len]); // auth params
+                let l1 = buf.len() - l0;
+                buf.push_octet_string(security.username()); // user name
+                buf.push_integer(security_state.engine_time()); // time
+                buf.push_integer(security_state.engine_boots()); // boots
+                buf.push_octet_string(security_state.engine_id()); // engine ID
+                auth_pos = buf.len() - l1;
+                sec_buf_len = buf.len();
+            });
+            buf.push_octet_string(&sec_buf_seq);
+            buf.push_sequence(|buf| {
+                buf.push_integer(3); // security_model
+                buf.push_octet_string(&[flags]); // flags
+                buf.push_integer(BUFFER_SIZE.try_into().unwrap()); // max_size
+                buf.push_integer(req_id.into()); // msg_id
+            });
+            buf.push_integer(3); // version
+            auth_pos = buf.len() - l0 - (sec_buf_len - auth_pos);
+            inner_len = buf.len();
         });
-        buf.push_octet_string(&sec_buf_seq);
-        buf.push_sequence(|buf| {
-            buf.push_integer(3); // security_model
-            buf.push_octet_string(&[flags]); // flags
-            buf.push_integer(BUFFER_SIZE.try_into().unwrap()); // max_size
-            buf.push_integer(req_id.into()); // msg_id
-        });
-        buf.push_integer(3); // version
-        auth_pos = buf.len() - l0 - (sec_buf_len - auth_pos);
-        inner_len = buf.len();
-    });
+    };
 
     auth_pos += buf.len() - inner_len;
     if (auth_pos + truncation_len) > buf.len() {

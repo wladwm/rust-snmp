@@ -74,7 +74,7 @@ impl SNMPOwnedPdu {
         Varbinds::from_bytes(&self.varbind_bytes).find(|v| v.0.eq(oid))
     }
 }
-impl std::convert::TryFrom<crate::SnmpPdu<'_>> for SNMPOwnedPdu {
+impl TryFrom<crate::SnmpPdu<'_>> for SNMPOwnedPdu {
     type Error = SnmpError;
     fn try_from(value: crate::SnmpPdu<'_>) -> Result<Self, Self::Error> {
         let varbind_bytes = value.varbinds.inner.as_ref().to_vec();
@@ -310,16 +310,15 @@ impl SNMPSession {
         )?;
         self.send_and_get(repeat, timeout).await
     }
-    pub async fn getmulti<NAMES, ITMB, ITM>(
+    pub async fn getmulti<NAMES, ITM>(
         &mut self,
         names: NAMES,
         repeat: u32,
         timeout: Duration,
     ) -> SnmpResult<SNMPOwnedPdu>
     where
-        NAMES: std::iter::IntoIterator<Item = ITMB> + Copy,
+        NAMES: std::iter::IntoIterator<Item = ITM>,
         NAMES::IntoIter: DoubleEndedIterator,
-        ITMB: std::ops::Deref<Target = ITM>,
         ITM: VarbindOid,
     {
         #[cfg(feature = "v3")]
@@ -339,7 +338,7 @@ impl SNMPSession {
         timeout: Duration,
     ) -> SnmpResult<SNMPOwnedPdu>
     where
-        ITM: crate::VarbindOid,
+        ITM: VarbindOid,
     {
         #[cfg(feature = "v3")]
         self.check_security(timeout).await?;
@@ -352,7 +351,7 @@ impl SNMPSession {
         self.send_and_get(repeat, timeout).await
     }
 
-    pub async fn getbulk<NAMES, ITMB, ITM>(
+    pub async fn getbulk<NAMES, ITM>(
         &mut self,
         names: NAMES,
         non_repeaters: u32,
@@ -361,10 +360,9 @@ impl SNMPSession {
         timeout: Duration,
     ) -> SnmpResult<SNMPOwnedPdu>
     where
-        NAMES: std::iter::IntoIterator<Item = ITMB> + Copy,
+        NAMES: std::iter::IntoIterator<Item = ITM>,
         NAMES::IntoIter: DoubleEndedIterator,
-        ITMB: std::ops::Deref<Target = ITM>,
-        ITM: crate::VarbindOid,
+        ITM: VarbindOid,
     {
         #[cfg(feature = "v3")]
         self.check_security(timeout).await?;
@@ -391,21 +389,20 @@ impl SNMPSession {
     ///   - `Timeticks`
     ///   - `Opaque`
     ///   - `Counter64`
-    pub async fn set<NAMES, ITMB, ITM>(
+    pub async fn set<NAMES, ITM>(
         &mut self,
         values: NAMES, //&[(&[u32], Value<'_>)],
         repeat: u32,
         timeout: Duration,
     ) -> SnmpResult<SNMPOwnedPdu>
     where
-        NAMES: std::iter::IntoIterator<Item = ITMB> + Copy,
+        NAMES: std::iter::IntoIterator<Item = ITM>,
         NAMES::IntoIter: DoubleEndedIterator,
-        ITMB: std::ops::Deref<Target = ITM>,
         ITM: crate::VarbindOid,
     {
         #[cfg(feature = "v3")]
         self.check_security(timeout).await?;
-        pdu::build_set_oids(
+        pdu::build_set(
             &self.security.read().unwrap(),
             self.req_id.0,
             values,

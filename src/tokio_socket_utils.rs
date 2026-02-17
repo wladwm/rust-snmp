@@ -4,6 +4,7 @@ use futures_util::future::{BoxFuture, FutureExt};
 use futures_util::stream::Stream;
 use std::pin::Pin;
 use std::task::{Context, Poll};
+use std::time::Duration;
 
 #[derive(Clone, Debug)]
 pub struct SnmpWalkParams {
@@ -48,7 +49,7 @@ impl<'a, 'b> SnmpWalkInner<'a, 'b> {
         let rsp = match if self.params.bulk > 1 {
             self.sess
                 .getbulk(
-                    &[&self.reqnext[..]],
+                    [&self.reqnext[..]],
                     0,
                     self.params.bulk,
                     self.params.tries,

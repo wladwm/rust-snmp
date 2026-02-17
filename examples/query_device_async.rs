@@ -36,8 +36,8 @@ async fn test(device: &str, security: &str) -> SnmpResult<()> {
     let pdu = sess
         .getbulk(
             [
-                &[1u32, 3, 6, 1, 2, 1, 1, 5].as_slice(),
-                &[1u32, 3, 6, 1, 2, 1, 31, 1, 1, 1, 1].as_slice(),
+                [1u32, 3, 6, 1, 2, 1, 1, 5].as_slice(),
+                [1u32, 3, 6, 1, 2, 1, 31, 1, 1, 1, 1].as_slice(),
             ],
             1,
             100,

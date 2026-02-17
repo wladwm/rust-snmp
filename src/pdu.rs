@@ -1,4 +1,4 @@
-use super::{asn1, snmp, SnmpCredentials, SnmpSecurity, Value, VarbindOid, BUFFER_SIZE};
+use super::{asn1, snmp, SnmpCredentials, SnmpSecurity, Value, VarbindOid, SnmpResult, BUFFER_SIZE};
 use std::{fmt, mem, ops, ptr};
 
 pub struct Buf {
@@ -271,7 +271,7 @@ impl Buf {
 
 pub(crate) fn push_varbinds_raw<'c, 'b: 'c, VLS, OBJNM, VL>(buf: &mut Buf, values: VLS)
 where
-    VLS: std::iter::IntoIterator<Item = &'c (OBJNM, VL)> + Copy,
+    VLS: std::iter::IntoIterator<Item = &'c (OBJNM, VL)>,
     VLS::IntoIter: DoubleEndedIterator,
     OBJNM: crate::AsOidRaw + 'c,
     VL: std::borrow::Borrow<Value<'b>> + 'c,
@@ -312,7 +312,7 @@ pub(crate) fn build_inner_raw<'c, 'b: 'c, VLS, OBJNM, VL>(
     u2: u32, //max_repetitions|error_status
     buf: &mut Buf,
 ) where
-    VLS: std::iter::IntoIterator<Item = &'c (OBJNM, VL)> + Copy,
+    VLS: std::iter::IntoIterator<Item = &'c (OBJNM, VL)>,
     VLS::IntoIter: DoubleEndedIterator,
     OBJNM: crate::AsOidRaw + 'c,
     VL: std::borrow::Borrow<Value<'b>> + 'c,
@@ -324,17 +324,16 @@ pub(crate) fn build_inner_raw<'c, 'b: 'c, VLS, OBJNM, VL>(
         buf.push_integer(i64::from(req_id));
     });
 }
-pub fn push_varbinds_oid<VLS, ITMB, ITM>(buf: &mut Buf, values: VLS)
+pub fn push_varbinds_oid<VLS, ITM>(buf: &mut Buf, values: VLS)
 where
-    VLS: std::iter::IntoIterator<Item = ITMB>,
+    VLS: std::iter::IntoIterator<Item = ITM>,
     VLS::IntoIter: DoubleEndedIterator,
-    ITMB: std::ops::Deref<Target = ITM>,
     ITM: VarbindOid,
 {
     buf.push_sequence(|buf| {
         for itm in values.into_iter().rev() {
             buf.push_sequence(|buf| {
-                if let Some(v) = itm.deref().value().as_ref() {
+                if let Some(v) = itm.value() {
                     match v {
                         Value::Boolean(b) => buf.push_boolean(*b),
                         Value::Null => buf.push_null(),
@@ -358,13 +357,13 @@ where
                     buf.push_null();
                 }
                 //buf.push_object_identifier_raw(itm.0.as_oid_raw());
-                buf.push_object_identifier(itm.deref().oid());
+                buf.push_object_identifier(itm.oid());
             });
         }
     });
 }
 #[inline]
-pub fn build_inner_oid<VLS, ITMB, ITM>(
+pub fn build_inner_oid<VLS, ITM>(
     req_id: i32,
     ident: u8,
     values: VLS,
@@ -372,9 +371,8 @@ pub fn build_inner_oid<VLS, ITMB, ITM>(
     u2: u32, //max_repetitions|error_status
     buf: &mut Buf,
 ) where
-    VLS: std::iter::IntoIterator<Item = ITMB>,
+    VLS: std::iter::IntoIterator<Item = ITM>,
     VLS::IntoIter: DoubleEndedIterator,
-    ITMB: std::ops::Deref<Target = ITM>,
     ITM: VarbindOid,
 {
     buf.push_constructed(ident, |buf| {
@@ -385,7 +383,7 @@ pub fn build_inner_oid<VLS, ITMB, ITM>(
     });
 }
 
-pub fn build_v2<VLS, ITMB, ITM>(
+pub fn build_v2<VLS, ITM>(
     ident: u8,
     community: &[u8],
     req_id: i32,
@@ -394,12 +392,11 @@ pub fn build_v2<VLS, ITMB, ITM>(
     u2: u32,
     buf: &mut Buf,
     version: i32,
-) -> crate::SnmpResult<()>
+) -> SnmpResult<()>
 where
-    VLS: std::iter::IntoIterator<Item = ITMB>,
+    VLS: std::iter::IntoIterator<Item = ITM>,
     VLS::IntoIter: DoubleEndedIterator,
-    ITMB: std::ops::Deref<Target = ITM>,
-    ITM: crate::VarbindOid,
+    ITM: VarbindOid,
 {
     buf.reset();
     buf.push_sequence(|buf| {
@@ -414,7 +411,7 @@ where
     });
     Ok(())
 }
-pub fn build<VLS, ITMB, ITM>(
+pub fn build<VLS, ITM>(
     ident: u8,
     security: &SnmpSecurity,
     req_id: i32,
@@ -422,12 +419,11 @@ pub fn build<VLS, ITMB, ITM>(
     u1: u32,
     u2: u32,
     buf: &mut Buf,
-) -> crate::SnmpResult<()>
+) -> SnmpResult<()>
 where
-    VLS: std::iter::IntoIterator<Item = ITMB> + std::clone::Clone,
+    VLS: std::iter::IntoIterator<Item = ITM>,
     VLS::IntoIter: DoubleEndedIterator,
-    ITMB: std::ops::Deref<Target = ITM>,
-    ITM: crate::VarbindOid,
+    ITM: VarbindOid,
 {
     match security.credentials {
         SnmpCredentials::V12 {
@@ -454,23 +450,22 @@ pub fn build_get<ITM>(
     req_id: i32,
     name: ITM,
     buf: &mut Buf,
-) -> crate::SnmpResult<()>
+) -> SnmpResult<()>
 where
-    ITM: crate::VarbindOid,
+    ITM: VarbindOid,
 {
-    build(snmp::MSG_GET, security, req_id, [&name], 0, 0, buf)
+    build(snmp::MSG_GET, security, req_id, [name], 0, 0, buf)
 }
-pub fn build_getmulti<NAMES, ITMB, ITM>(
+pub fn build_getmulti<NAMES, ITM>(
     security: &SnmpSecurity,
     req_id: i32,
     names: NAMES,
     buf: &mut Buf,
-) -> crate::SnmpResult<()>
+) -> SnmpResult<()>
 where
-    NAMES: std::iter::IntoIterator<Item = ITMB> + Copy,
+    NAMES: std::iter::IntoIterator<Item = ITM>,
     NAMES::IntoIter: DoubleEndedIterator,
-    ITMB: std::ops::Deref<Target = ITM>,
-    ITM: crate::VarbindOid,
+    ITM: VarbindOid,
 {
     build(snmp::MSG_GET, security, req_id, names, 0, 0, buf)
 }
@@ -487,26 +482,25 @@ pub fn build_getnext<ITM>(
     req_id: i32,
     name: ITM,
     buf: &mut Buf,
-) -> crate::SnmpResult<()>
+) -> SnmpResult<()>
 where
-    ITM: crate::VarbindOid,
+    ITM: VarbindOid,
 {
-    build(snmp::MSG_GET_NEXT, security, req_id, [&name], 0, 0, buf)
+    build(snmp::MSG_GET_NEXT, security, req_id, [name], 0, 0, buf)
 }
 
-pub fn build_getbulk<NAMES, ITMB, ITM>(
+pub fn build_getbulk<NAMES, ITM>(
     security: &SnmpSecurity,
     req_id: i32,
     names: NAMES,
     non_repeaters: u32,
     max_repetitions: u32,
     buf: &mut Buf,
-) -> crate::SnmpResult<()>
+) -> SnmpResult<()>
 where
-    NAMES: std::iter::IntoIterator<Item = ITMB> + Copy,
+    NAMES: std::iter::IntoIterator<Item = ITM>,
     NAMES::IntoIter: DoubleEndedIterator,
-    ITMB: std::ops::Deref<Target = ITM>,
-    ITM: crate::VarbindOid,
+    ITM: VarbindOid,
 {
     build(
         snmp::MSG_GET_BULK,
@@ -519,79 +513,29 @@ where
     )
 }
 
-pub fn build_set_oids<NAMES, ITMB, ITM>(
+pub fn build_set<NAMES, ITM>(
     security: &SnmpSecurity,
     req_id: i32,
     values: NAMES,
     buf: &mut Buf,
-) -> crate::SnmpResult<()>
+) -> SnmpResult<()>
 where
-    NAMES: std::iter::IntoIterator<Item = ITMB> + Copy,
+    NAMES: std::iter::IntoIterator<Item = ITM>,
     NAMES::IntoIter: DoubleEndedIterator,
-    ITMB: std::ops::Deref<Target = ITM>,
-    ITM: crate::VarbindOid,
+    ITM: VarbindOid,
 {
     build(snmp::MSG_SET, security, req_id, values, 0, 0, buf)
 }
 
-pub fn build_set<'c, 'b: 'c, VLS, OBJNM, VL>(
-    community: &[u8],
-    req_id: i32,
-    values: VLS, //&[(&[u32], Value)],
-    buf: &mut Buf,
-    version: i32,
-) where
-    VLS: std::iter::IntoIterator<Item = &'c (OBJNM, VL)> + Copy,
-    VLS::IntoIter: DoubleEndedIterator,
-    OBJNM: crate::AsOid + 'c,
-    VL: std::borrow::Borrow<Value<'b>> + 'c,
-{
-    buf.reset();
-    buf.push_sequence(|buf| {
-        buf.push_constructed(snmp::MSG_SET, |buf| {
-            buf.push_sequence(|buf| {
-                for (name, val) in values.into_iter().rev() {
-                    buf.push_sequence(|buf| {
-                        use Value::*;
-                        match val.borrow() {
-                            Boolean(b) => buf.push_boolean(*b),
-                            Null => buf.push_null(),
-                            Integer(i) => buf.push_integer(*i),
-                            OctetString(ostr) => buf.push_octet_string(ostr),
-                            ObjectIdentifier(ref objid) => {
-                                buf.push_object_identifier_raw(objid.raw())
-                            }
-                            IpAddress(ref ip) => buf.push_ipaddress(ip),
-                            Counter32(i) => buf.push_counter32(*i),
-                            Unsigned32(i) => buf.push_unsigned32(*i),
-                            Timeticks(tt) => buf.push_timeticks(*tt),
-                            Opaque(bytes) => buf.push_opaque(bytes),
-                            Counter64(i) => buf.push_counter64(*i),
-                            _ => unimplemented!(),
-                        }
-                        buf.push_object_identifier(name.as_oid()); // name
-                    });
-                }
-            });
-            buf.push_integer(0);
-            buf.push_integer(0);
-            buf.push_integer(req_id as i64);
-        });
-        buf.push_octet_string(community);
-        push_version(buf, version);
-    });
-}
-
-pub fn build_response<NAMES, ITMB, ITM>(
+pub fn build_response<NAMES, ITM>(
     security: &SnmpSecurity,
     req_id: i32,
     values: NAMES,
     buf: &mut Buf,
-) -> crate::SnmpResult<()>
+) -> SnmpResult<()>
 where
-    NAMES: std::iter::IntoIterator<Item = ITMB> + Copy,
+    NAMES: std::iter::IntoIterator<Item = ITM>,
     NAMES::IntoIter: DoubleEndedIterator,
-    ITMB: std::ops::Deref<Target = ITM>,
     ITM: crate::VarbindOid,
 {
     build(snmp::MSG_RESPONSE, security, req_id, values, 0, 0, buf)
