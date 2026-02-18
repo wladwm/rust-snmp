@@ -1566,7 +1566,7 @@ where
                 buf.push_integer(3); // security_model
                 buf.push_octet_string(&[flags]); // flags
                 buf.push_integer(BUFFER_SIZE.try_into().unwrap()); // max_size
-                buf.push_integer(req_id.into()); // msg_id
+                buf.push_integer(msg_id.into()); // msg_id
             });
             buf.push_integer(3); // version
             auth_pos = buf.len() - l0 - (sec_buf_len - auth_pos);
