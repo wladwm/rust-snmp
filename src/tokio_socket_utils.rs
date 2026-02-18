@@ -45,7 +45,7 @@ impl<'a, 'b> SnmpWalkInner<'a, 'b> {
             reqnext: walkoid.to_vec(),
         }
     }
-    async fn getnext(self) -> Result<(SNMPOwnedPdu, SnmpWalkInner<'a, 'b>), SnmpError> {
+    async fn getnext(self) -> Result<(SnmpOwnedPdu, SnmpWalkInner<'a, 'b>), SnmpError> {
         let rsp = match if self.params.bulk > 1 {
             self.sess
                 .getbulk(
@@ -77,25 +77,25 @@ unsafe impl<'a, 'b> Send for SnmpWalkInner<'a, 'b> {}
 #[must_use = "futures do nothing unless you `.await` or poll them"]
 pub struct SnmpWalk<'a: 'c, 'b: 'c, 'c, F, T>
 where
-    F: Fn(ObjectIdentifier, Value, &SNMPOwnedPdu) -> Option<T>,
+    F: Fn(ObjectIdentifier, Value, &SnmpOwnedPdu) -> Option<T>,
 {
     inner: Option<SnmpWalkInner<'a, 'b>>,
-    rsp: Option<SNMPOwnedPdu>,
+    rsp: Option<SnmpOwnedPdu>,
     pos: usize,
-    futget: Option<BoxFuture<'c, Result<(SNMPOwnedPdu, SnmpWalkInner<'a, 'b>), SnmpError>>>,
+    futget: Option<BoxFuture<'c, Result<(SnmpOwnedPdu, SnmpWalkInner<'a, 'b>), SnmpError>>>,
     func: F,
 }
 impl<'a, 'b, 'c, F, T> Unpin for SnmpWalk<'a, 'b, 'c, F, T> where
-    F: Fn(ObjectIdentifier, Value, &SNMPOwnedPdu) -> Option<T>
+    F: Fn(ObjectIdentifier, Value, &SnmpOwnedPdu) -> Option<T>
 {
 }
 unsafe impl<'a, 'b, 'c, F, T> Send for SnmpWalk<'a, 'b, 'c, F, T> where
-    F: Fn(ObjectIdentifier, Value, &SNMPOwnedPdu) -> Option<T>
+    F: Fn(ObjectIdentifier, Value, &SnmpOwnedPdu) -> Option<T>
 {
 }
 impl<'a: 'c, 'b: 'c, 'c, F, T> SnmpWalk<'a, 'b, 'c, F, T>
 where
-    F: Fn(ObjectIdentifier, Value, &SNMPOwnedPdu) -> Option<T>,
+    F: Fn(ObjectIdentifier, Value, &SnmpOwnedPdu) -> Option<T>,
 {
     pub fn new(
         sess: &'a mut SNMPSession,
@@ -117,7 +117,7 @@ where
 }
 impl<'a: 'c, 'b: 'c, 'c, F, T> Stream for SnmpWalk<'a, 'b, 'c, F, T>
 where
-    F: Fn(ObjectIdentifier, Value, &SNMPOwnedPdu) -> Option<T>,
+    F: Fn(ObjectIdentifier, Value, &SnmpOwnedPdu) -> Option<T>,
 {
     type Item = Result<T, SnmpError>;
     fn poll_next(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<Option<Self::Item>> {

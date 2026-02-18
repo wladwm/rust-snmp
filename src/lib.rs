@@ -216,7 +216,7 @@ impl std::fmt::Display for SnmpCredentials {
 pub struct SnmpSecurity {
     pub credentials: SnmpCredentials,
     #[cfg(feature = "v3")]
-    pub state: v3::SecurityState,
+    pub state: v3::AuthoritativeState,
 }
 impl std::convert::From<SnmpCredentials> for SnmpSecurity {
     fn from(credentials: SnmpCredentials) -> SnmpSecurity {
@@ -448,13 +448,13 @@ impl AsOidRaw for &[u8] {
 
 pub trait VarbindOid {
     fn oid<'a>(&'a self) -> &'a [u32];
-    fn value<'a>(&'a self) -> Option<&'a Value<'a>>;
+    fn value<'a>(&'a self) -> Option<&'a Value<'_>>;
 }
 impl VarbindOid for &[u32] {
     fn oid<'a>(&'a self) -> &'a [u32] {
         self
     }
-    fn value<'a>(&'a self) -> Option<&'a Value<'a>> {
+    fn value<'a>(&'a self) -> Option<&'a Value<'_>> {
         None
     }
 }
@@ -462,7 +462,7 @@ impl VarbindOid for &&[u32] {
     fn oid<'a>(&'a self) -> &'a [u32] {
         *self
     }
-    fn value<'a>(&'a self) -> Option<&'a Value<'a>> {
+    fn value<'a>(&'a self) -> Option<&'a Value<'_>> {
         None
     }
 }
@@ -470,7 +470,7 @@ impl VarbindOid for [u32] {
     fn oid<'a>(&'a self) -> &'a [u32] {
         self
     }
-    fn value<'a>(&'a self) -> Option<&'a Value<'a>> {
+    fn value<'a>(&'a self) -> Option<&'a Value<'_>> {
         None
     }
 }
@@ -478,7 +478,7 @@ impl VarbindOid for Vec<u32> {
     fn oid<'a>(&'a self) -> &'a [u32] {
         &self
     }
-    fn value<'a>(&'a self) -> Option<&'a Value<'a>> {
+    fn value<'a>(&'a self) -> Option<&'a Value<'_>> {
         None
     }
 }
@@ -494,7 +494,7 @@ impl<'v> VarbindOid for (&[u32], Value<'v>) {
     fn oid<'a>(&'a self) -> &'a [u32] {
         self.0
     }
-    fn value<'a>(&'a self) -> Option<&'a Value<'a>> {
+    fn value<'a>(&'a self) -> Option<&'a Value<'v>> {
         Some(&self.1)
     }
 }
@@ -502,7 +502,7 @@ impl<'v> VarbindOid for &(&[u32], Value<'v>) {
     fn oid<'a>(&'a self) -> &'a [u32] {
         self.0
     }
-    fn value<'a>(&'a self) -> Option<&'a Value<'a>> {
+    fn value<'a>(&'a self) -> Option<&'a Value<'v>> {
         Some(&self.1)
     }
 }

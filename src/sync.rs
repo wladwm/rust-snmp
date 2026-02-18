@@ -8,6 +8,8 @@ use std::time::Duration;
 pub struct SyncSession {
     socket: UdpSocket,
     security: SnmpSecurity,
+    #[cfg(feature = "v3")]
+    secbuf: crate::v3::SecurityBuf,
     req_id: Wrapping<i32>,
     send_pdu: pdu::Buf,
     recv_buf: [u8; BUFFER_SIZE],
@@ -36,6 +38,8 @@ impl SyncSession {
             req_id: Wrapping(starting_req_id),
             send_pdu: pdu::Buf::default(),
             recv_buf: [0; 4096],
+            #[cfg(feature = "v3")]
+            secbuf: crate::v3::SecurityBuf::default(),
         })
     }
 
@@ -75,6 +79,7 @@ impl SyncSession {
                 pdu_bytes,
                 self.security.credentials.v3(),
                 Some(&mut self.security.state),
+                Some(&mut self.secbuf),
             )?;
         }
         #[cfg(not(feature = "v3"))]

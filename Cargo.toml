@@ -17,6 +17,7 @@ sync = []
 simpleasync = ["tokio","tokio-util"]
 async = ["tokio","tokio-util"]
 v3 = ["openssl"]
+localdes = ["easydes"]
 
 [dependencies]
 tokio = { version="1", features = ["net","macros"], optional = true }
@@ -27,6 +28,7 @@ futures = { version="0", optional = true }
 futures-util = { version="0", optional = true }
 log = "0"
 openssl = { version = "0.10", optional = true }
+easydes = { version = "0.1.6", optional = true }
 
 [dev-dependencies]
 tokio = { version="1", features = ["full"] }

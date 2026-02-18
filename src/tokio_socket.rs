@@ -16,7 +16,7 @@ use tokio::time::{self, Duration};
 const BUFFER_SIZE: usize = 4096;
 
 #[derive(Debug, Clone)]
-pub struct SNMPOwnedPdu {
+pub struct SnmpOwnedPdu {
     pub varbind_bytes: Vec<u8>,
     pub version: i64,
     pub community: Vec<u8>,
@@ -24,10 +24,11 @@ pub struct SNMPOwnedPdu {
     pub req_id: i32,
     pub error_status: u32,
     pub error_index: u32,
-    //pub varbinds: crate::Varbinds<'a>,
+    #[cfg(feature = "v3")]
+    pub v3_msg_id: i32,
 }
-impl SNMPOwnedPdu {
-    pub fn from_bytes(bytes: &[u8]) -> SnmpResult<SNMPOwnedPdu> {
+impl SnmpOwnedPdu {
+    pub fn from_bytes(bytes: &[u8]) -> SnmpResult<SnmpOwnedPdu> {
         let seq = AsnReader::from_bytes(bytes).read_raw(asn1::TYPE_SEQUENCE)?;
         let mut rdr = AsnReader::from_bytes(seq);
         let version = rdr.read_asn_integer()?;
@@ -57,7 +58,7 @@ impl SNMPOwnedPdu {
 
         let varbind_bytes = response_pdu.read_raw(asn1::TYPE_SEQUENCE)?.to_vec();
 
-        Ok(SNMPOwnedPdu {
+        Ok(SnmpOwnedPdu {
             varbind_bytes,
             version,
             community,
@@ -65,6 +66,8 @@ impl SNMPOwnedPdu {
             req_id: req_id as i32,
             error_status: error_status as u32,
             error_index: error_index as u32,
+            #[cfg(feature = "v3")]
+            v3_msg_id: 0,
         })
     }
     pub fn varbinds(&self) -> Varbinds<'_> {
@@ -74,11 +77,11 @@ impl SNMPOwnedPdu {
         Varbinds::from_bytes(&self.varbind_bytes).find(|v| v.0.eq(oid))
     }
 }
-impl TryFrom<crate::SnmpPdu<'_>> for SNMPOwnedPdu {
+impl TryFrom<crate::SnmpPdu<'_>> for SnmpOwnedPdu {
     type Error = SnmpError;
     fn try_from(value: crate::SnmpPdu<'_>) -> Result<Self, Self::Error> {
         let varbind_bytes = value.varbinds.inner.as_ref().to_vec();
-        Ok(SNMPOwnedPdu {
+        Ok(SnmpOwnedPdu {
             varbind_bytes,
             version: value.version,
             community: value.community.to_vec(),
@@ -86,7 +89,24 @@ impl TryFrom<crate::SnmpPdu<'_>> for SNMPOwnedPdu {
             req_id: value.req_id,
             error_status: value.error_status,
             error_index: value.error_index,
+            #[cfg(feature = "v3")]
+            v3_msg_id: value.v3_msg_id,
         })
+    }
+}
+impl<'a> std::convert::From<&'a SnmpOwnedPdu> for crate::SnmpPdu<'a> {
+    fn from(value: &'a SnmpOwnedPdu) -> crate::SnmpPdu<'a> {
+        Self {
+            version: value.version,
+            community: &value.community,
+            message_type: value.message_type.clone(),
+            req_id: value.req_id,
+            error_status: value.error_status,
+            error_index: value.error_index,
+            varbinds: Varbinds::from_bytes(&value.varbind_bytes),
+            #[cfg(feature = "v3")]
+            v3_msg_id: value.v3_msg_id,
+        }
     }
 }
 struct LimitBasket {
@@ -174,7 +194,7 @@ pub struct SNMPSession {
     req_id: Wrapping<i32>,
     pub host: SocketAddr,
     need_reqid: Arc<std::sync::atomic::AtomicI32>,
-    rx: Receiver<SNMPOwnedPdu>,
+    rx: Receiver<SnmpOwnedPdu>,
     send_pdu: pdu::Buf,
 }
 impl SNMPSession {
@@ -217,7 +237,7 @@ impl SNMPSession {
     pub async fn set_send_limit(&self, limit_pps: usize) {
         self.socket.set_send_limit(limit_pps).await;
     }
-    async fn send_and_recv_timeout(&mut self, timeout: Duration) -> SnmpResult<SNMPOwnedPdu> {
+    async fn send_and_recv_timeout(&mut self, timeout: Duration) -> SnmpResult<SnmpOwnedPdu> {
         while self.rx.try_recv().is_ok() {}
         let _sent_bytes = match self.socket.send_to(&self.send_pdu[..], self.host).await {
             Err(e) => {
@@ -237,7 +257,7 @@ impl SNMPSession {
         &mut self,
         repeat: u32,
         timeout: Duration,
-    ) -> SnmpResult<SNMPOwnedPdu> {
+    ) -> SnmpResult<SnmpOwnedPdu> {
         for _ in 1..repeat {
             match self.send_and_recv_timeout(timeout).await {
                 Err(e) => match e {
@@ -280,7 +300,7 @@ impl SNMPSession {
         }
     }
 
-    async fn send_and_get(&mut self, repeat: u32, timeout: Duration) -> SnmpResult<SNMPOwnedPdu> {
+    async fn send_and_get(&mut self, repeat: u32, timeout: Duration) -> SnmpResult<SnmpOwnedPdu> {
         let req_id = self.req_id.0;
         self.need_reqid
             .store(req_id, std::sync::atomic::Ordering::Relaxed);
@@ -299,7 +319,7 @@ impl SNMPSession {
         name: &[u32],
         repeat: u32,
         timeout: Duration,
-    ) -> SnmpResult<SNMPOwnedPdu> {
+    ) -> SnmpResult<SnmpOwnedPdu> {
         #[cfg(feature = "v3")]
         self.check_security(timeout).await?;
         pdu::build_get(
@@ -315,7 +335,7 @@ impl SNMPSession {
         names: NAMES,
         repeat: u32,
         timeout: Duration,
-    ) -> SnmpResult<SNMPOwnedPdu>
+    ) -> SnmpResult<SnmpOwnedPdu>
     where
         NAMES: std::iter::IntoIterator<Item = ITM>,
         NAMES::IntoIter: DoubleEndedIterator,
@@ -336,7 +356,7 @@ impl SNMPSession {
         name: ITM,
         repeat: u32,
         timeout: Duration,
-    ) -> SnmpResult<SNMPOwnedPdu>
+    ) -> SnmpResult<SnmpOwnedPdu>
     where
         ITM: VarbindOid,
     {
@@ -358,7 +378,7 @@ impl SNMPSession {
         max_repetitions: u32,
         repeat: u32,
         timeout: Duration,
-    ) -> SnmpResult<SNMPOwnedPdu>
+    ) -> SnmpResult<SnmpOwnedPdu>
     where
         NAMES: std::iter::IntoIterator<Item = ITM>,
         NAMES::IntoIter: DoubleEndedIterator,
@@ -394,7 +414,7 @@ impl SNMPSession {
         values: NAMES, //&[(&[u32], Value<'_>)],
         repeat: u32,
         timeout: Duration,
-    ) -> SnmpResult<SNMPOwnedPdu>
+    ) -> SnmpResult<SnmpOwnedPdu>
     where
         NAMES: std::iter::IntoIterator<Item = ITM>,
         NAMES::IntoIter: DoubleEndedIterator,
@@ -415,7 +435,7 @@ impl SNMPSession {
         oid: &str,
         repeat: u32,
         timeout: Duration,
-    ) -> SnmpResult<SNMPOwnedPdu> {
+    ) -> SnmpResult<SnmpOwnedPdu> {
         self.get(get_oid_array(oid).as_slice(), repeat, timeout)
             .await
     }
@@ -424,7 +444,7 @@ impl SNMPSession {
         oid: &str,
         repeat: u32,
         timeout: Duration,
-    ) -> SnmpResult<SNMPOwnedPdu> {
+    ) -> SnmpResult<SnmpOwnedPdu> {
         self.getnext(get_oid_array(oid).as_slice(), repeat, timeout)
             .await
     }
@@ -432,13 +452,13 @@ impl SNMPSession {
 
 struct SNMPSessionBack {
     reqid: Arc<std::sync::atomic::AtomicI32>,
-    txresp: Sender<SNMPOwnedPdu>,
+    txresp: Sender<SnmpOwnedPdu>,
     security: Arc<std::sync::RwLock<SnmpSecurity>>,
 }
 impl SNMPSessionBack {
     fn new(
         reqid: Arc<std::sync::atomic::AtomicI32>,
-        txresp: Sender<SNMPOwnedPdu>,
+        txresp: Sender<SnmpOwnedPdu>,
         security: Arc<std::sync::RwLock<SnmpSecurity>>,
     ) -> SNMPSessionBack {
         SNMPSessionBack {
@@ -452,7 +472,7 @@ impl SNMPSessionBack {
         let mut sec = self.security.write().unwrap();
         if (*sec).credentials.version() == 3 {
             if (*sec).state.need_init() {
-                let resp = SNMPOwnedPdu {
+                let resp = SnmpOwnedPdu {
                     varbind_bytes: buf.to_vec(),
                     version: 3,
                     community: Vec::new(),
@@ -460,6 +480,7 @@ impl SNMPSessionBack {
                     req_id: 0,
                     error_status: 0,
                     error_index: 0,
+                    v3_msg_id: 0,
                 };
                 return self
                     .txresp
@@ -467,13 +488,15 @@ impl SNMPSessionBack {
                     .map_err(|_| SnmpError::ChannelOverflow);
             }
         }
+        let mut sb = crate::v3::SecurityBuf::default();
         let pdu;
         if let SnmpSecurity {
             credentials: SnmpCredentials::V3(v3),
             state,
         } = &mut (*sec)
         {
-            pdu = crate::SnmpPdu::from_bytes_with_security(buf, Some(v3), Some(state))?
+            pdu =
+                crate::SnmpPdu::from_bytes_with_security(buf, Some(v3), Some(state), Some(&mut sb))?
         } else {
             return Err(SnmpError::AuthFailure(
                 crate::v3::AuthErrorKind::UnsupportedUSM,
@@ -482,7 +505,7 @@ impl SNMPSessionBack {
         if pdu.req_id != self.reqid.load(std::sync::atomic::Ordering::Relaxed) {
             return Ok(());
         }
-        let resp = SNMPOwnedPdu::try_from(pdu)?;
+        let resp = SnmpOwnedPdu::try_from(pdu)?;
         self.txresp
             .try_send(resp)
             .map_err(|_| SnmpError::ChannelOverflow)?;
@@ -496,7 +519,7 @@ enum SNMPSessionBacks {
 impl SNMPSessionBacks {
     fn new(
         reqid: Arc<std::sync::atomic::AtomicI32>,
-        txresp: Sender<SNMPOwnedPdu>,
+        txresp: Sender<SnmpOwnedPdu>,
         security: Arc<std::sync::RwLock<SnmpSecurity>>,
     ) -> SNMPSessionBacks {
         SNMPSessionBacks::Few(SNMPSessionBack::new(reqid, txresp, security))
@@ -552,7 +575,7 @@ impl SNMPSessionBacks {
         }
     }
     fn send_response(&self, buf: &[u8]) -> SnmpResult<()> {
-        let rsp = match SNMPOwnedPdu::from_bytes(buf) {
+        let rsp = match SnmpOwnedPdu::from_bytes(buf) {
             Ok(r) => r,
             Err(e) => {
                 #[cfg(not(feature = "v3"))]

@@ -4,6 +4,7 @@ use ::snmp::*;
 /*
 cargo run --example query_device_sync --features sync 1.1.1.1:161 public
 cargo run --example query_device_sync --features sync,v3 1.1.1.1:161 "v3:username=dave password=secret"
+cargo run --example query_device_sync --features sync,v3,localdes 1.1.1.1:161 "v3:username=davex password=secret123 cipher=DES privacy=PrivPass123 auth=authpriv"
 */
 
 fn test() -> SnmpResult<()> {

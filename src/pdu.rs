@@ -1,4 +1,6 @@
-use super::{asn1, snmp, SnmpCredentials, SnmpSecurity, Value, VarbindOid, SnmpResult, BUFFER_SIZE};
+use super::{
+    asn1, snmp, SnmpCredentials, SnmpResult, SnmpSecurity, Value, VarbindOid, BUFFER_SIZE,
+};
 use std::{fmt, mem, ops, ptr};
 
 pub struct Buf {

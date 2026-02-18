@@ -4,9 +4,10 @@ use ::snmp::*;
 /*
 cargo run --example query_device_async --features async 1.1.1.1:161 public
 cargo run --example query_device_async --features async,v3 1.1.1.1:161 "v3:username=dave password=secret"
+cargo run --example query_device_async --features async,v3,localdes 1.1.1.1:161 "v3:username=davex password=secret123 cipher=DES privacy=PrivPass123 auth=authpriv"
 */
 
-fn print_vars(rsp: &SNMPOwnedPdu) {
+fn print_vars(rsp: &SnmpOwnedPdu) {
     let vbs = rsp.varbinds();
     for (oid, v) in vbs {
         println!("{}\t{}", oid, v);
