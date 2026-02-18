@@ -1273,7 +1273,7 @@ pub fn parse_init_report(
 }
 
 /// Check SNMPv3 initial request
-pub fn check_init(buf: &[u8]) -> SnmpResult<i64> {
+pub fn check_init(buf: &[u8]) -> SnmpResult<SnmpPdu<'_>> {
     let seq = AsnReader::from_bytes(buf).read_raw(asn1::TYPE_SEQUENCE)?;
     let mut rdr = AsnReader::from_bytes(seq);
     let version = rdr.read_asn_integer()?;
@@ -1282,7 +1282,7 @@ pub fn check_init(buf: &[u8]) -> SnmpResult<i64> {
     }
     let global_data_seq = rdr.read_raw(crate::asn1::TYPE_SEQUENCE)?;
     let mut global_data_rdr = AsnReader::from_bytes(global_data_seq);
-    let msg_id = global_data_rdr.read_asn_integer()?;
+    let v3_msg_id = global_data_rdr.read_asn_integer()? as i32;
     let max_size = global_data_rdr.read_asn_integer()?;
     if max_size < 0 || max_size > i64::try_from(crate::BUFFER_SIZE).unwrap() {
         return Err(SnmpError::BufferOverflow);
@@ -1299,11 +1299,46 @@ pub fn check_init(buf: &[u8]) -> SnmpResult<i64> {
     if security_model != 3 {
         return Err(SnmpError::AuthFailure(AuthErrorKind::UnsupportedUSM));
     }
-    Ok(msg_id)
+    let security_params = rdr.read_asn_octetstring()?;
+    let security_seq = AsnReader::from_bytes(security_params).read_raw(asn1::TYPE_SEQUENCE)?;
+    let mut security_rdr = AsnReader::from_bytes(security_seq);
+    let _engine_id = security_rdr.read_asn_octetstring()?;
+    let _engine_boots = security_rdr.read_asn_integer()?;
+    let _engine_time = security_rdr.read_asn_integer()?;
+
+    let _username = security_rdr.read_asn_octetstring()?;
+    let _auth_params = security_rdr.read_asn_octetstring().map(<[u8]>::to_vec)?;
+    let _priv_params = security_rdr.read_asn_octetstring()?;
+
+    let scoped_pdu_seq = rdr.read_raw(asn1::TYPE_SEQUENCE)?;
+    let mut scoped_pdu_rdr = AsnReader::from_bytes(scoped_pdu_seq);
+    let _context_engine_id = scoped_pdu_rdr.read_asn_octetstring()?;
+    let _context_name = scoped_pdu_rdr.read_asn_octetstring()?;
+    let ident = scoped_pdu_rdr.peek_byte()?;
+    let message_type = SnmpMessageType::from_ident(ident)?;
+    let mut response_pdu = AsnReader::from_bytes(scoped_pdu_rdr.read_raw(ident)?);
+    let req_id: i32 = i32::try_from(response_pdu.read_asn_integer()?)?;
+    let error_status: u32 =
+        u32::try_from(response_pdu.read_asn_integer()?).map_err(|_| SnmpError::ValueOutOfRange)?;
+    let error_index: u32 = u32::try_from(response_pdu.read_asn_integer()?)?;
+    /*
+    let varbind_bytes = response_pdu.read_raw(asn1::TYPE_SEQUENCE)?;
+    let varbinds = Varbinds::from_bytes(varbind_bytes);
+    */
+    Ok(SnmpPdu {
+        version,
+        community: &[],
+        message_type,
+        req_id,
+        error_status,
+        error_index,
+        varbinds: Varbinds::from_bytes(&[]),
+        v3_msg_id,
+    })
 }
 
 /// Build SNMPv3 initial request
-pub fn build_init(req_id: i32, buf: &mut Buf) {
+pub fn build_init(req_id: i32, msg_id: i32, buf: &mut Buf) {
     buf.reset();
     let mut sec_buf = Buf::default();
     sec_buf.push_sequence(|sec| {
@@ -1330,7 +1365,7 @@ pub fn build_init(req_id: i32, buf: &mut Buf) {
             global.push_integer(3); // security_model
             global.push_octet_string(&[V3_MSG_FLAGS_REPORTABLE]); // flags
             global.push_integer(BUFFER_SIZE.try_into().unwrap()); // max_size
-            global.push_integer(req_id.into()); // msg_id
+            global.push_integer(msg_id.into()); // msg_id
         });
         message.push_integer(3i64);
     });
@@ -1581,4 +1616,21 @@ where
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test_v3_check_init() {
+        let pdu = [
+            48u8, 0x3e, 0x2, 0x1, 0x3, 0x30, 0x11, 0x2, 0x4, 0x13, 0x46, 0xe1, 0x1, 0x2, 0x3, 0x0,
+            0xff, 0xe3, 0x4, 0x1, 0x4, 0x2, 0x1, 0x3, 0x4, 0x10, 0x30, 0xe, 0x4, 0x0, 0x2, 0x1,
+            0x0, 0x2, 0x1, 0x0, 0x4, 0x0, 0x4, 0x0, 0x4, 0x0, 0x30, 0x14, 0x4, 0x0, 0x4, 0x0, 0xa0,
+            0xe, 0x2, 0x4, 0x6, 0x76, 0x8e, 0xbe, 0x2, 0x1, 0x0, 0x2, 0x1, 0x0, 0x30, 0x0,
+        ];
+        let pdu = crate::v3::check_init(pdu.as_slice()).unwrap();
+        assert_eq!(pdu.req_id, 108433086);
+        assert_eq!(pdu.v3_msg_id, 323412225);
+        assert_eq!(pdu.message_type, crate::SnmpMessageType::GetRequest);
+    }
 }

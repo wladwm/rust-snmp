@@ -278,7 +278,7 @@ impl SNMPSession {
                     (*swg).state.correct_authoritative_engine_time();
                     return Ok(());
                 }
-                crate::v3::build_init(self.req_id.0, &mut self.send_pdu);
+                crate::v3::build_init(self.req_id.0, self.req_id.0, &mut self.send_pdu);
             }
             let resp = self.send_and_recv_repeat(1, timeout).await?;
             self.req_id += Wrapping(1);
