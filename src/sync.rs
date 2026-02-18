@@ -12,7 +12,7 @@ pub struct SyncSession {
     secbuf: crate::v3::SecurityBuf,
     req_id: Wrapping<i32>,
     send_pdu: pdu::Buf,
-    recv_buf: [u8; BUFFER_SIZE],
+    recv_buf: Box<[u8; BUFFER_SIZE]>,
 }
 
 impl SyncSession {
@@ -37,7 +37,7 @@ impl SyncSession {
             security: creds.into(),
             req_id: Wrapping(starting_req_id),
             send_pdu: pdu::Buf::default(),
-            recv_buf: [0; 4096],
+            recv_buf: Box::new([0; BUFFER_SIZE]),
             #[cfg(feature = "v3")]
             secbuf: crate::v3::SecurityBuf::default(),
         })
@@ -117,7 +117,7 @@ impl SyncSession {
         #[cfg(feature = "v3")]
         self.check_security()?;
         let req_id = self.req_id.0;
-        pdu::build_get(&self.security, req_id, name, &mut self.send_pdu)?;
+        pdu::build_get(&self.security, req_id, req_id, name, &mut self.send_pdu)?;
         let recv_len = Self::send_and_recv_repeat(
             &self.socket,
             &self.send_pdu,
@@ -139,7 +139,7 @@ impl SyncSession {
         #[cfg(feature = "v3")]
         self.check_security()?;
         let req_id = self.req_id.0;
-        pdu::build_getnext(&self.security, req_id, name, &mut self.send_pdu)?;
+        pdu::build_getnext(&self.security, req_id, req_id, name, &mut self.send_pdu)?;
         let recv_len = Self::send_and_recv_repeat(
             &self.socket,
             &self.send_pdu,
@@ -172,6 +172,7 @@ impl SyncSession {
         let req_id = self.req_id.0;
         pdu::build_getbulk(
             &self.security,
+            req_id,
             req_id,
             names,
             non_repeaters,
@@ -210,7 +211,7 @@ impl SyncSession {
         #[cfg(feature = "v3")]
         self.check_security()?;
         let req_id = self.req_id.0;
-        pdu::build_set(&self.security, req_id, values, &mut self.send_pdu)?;
+        pdu::build_set(&self.security, req_id, req_id, values, &mut self.send_pdu)?;
         let recv_len = Self::send_and_recv_repeat(
             &self.socket,
             &self.send_pdu,

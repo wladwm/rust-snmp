@@ -1338,6 +1338,7 @@ pub fn build_init(req_id: i32, buf: &mut Buf) {
 
 pub fn build_init_report(
     req_id: i32,
+    msg_id: i32,
     auth_state: &AuthoritativeState,
     buf: &mut Buf,
 ) -> SnmpResult<()> {
@@ -1375,7 +1376,7 @@ pub fn build_init_report(
             global.push_integer(3); // security_model
             global.push_octet_string(&[0]); // flags
             global.push_integer(BUFFER_SIZE.try_into().unwrap()); // max_size
-            global.push_integer(req_id.into()); // msg_id
+            global.push_integer(msg_id.into()); // msg_id
         });
         message.push_integer(3i64);
     });
@@ -1385,6 +1386,7 @@ pub fn build_init_report(
 pub fn build_raw_v3(
     ident: u8,
     req_id: i32,
+    msg_id: i32,
     values: &[(&ObjectIdentifier, Value)],
     non_repeaters: u32,
     max_repetitions: u32,
@@ -1449,7 +1451,7 @@ pub fn build_raw_v3(
             buf.push_integer(3); // security_model
             buf.push_octet_string(&[flags]); // flags
             buf.push_integer(BUFFER_SIZE.try_into().unwrap()); // max_size
-            buf.push_integer(req_id.into()); // msg_id
+            buf.push_integer(msg_id.into()); // msg_id
         });
         buf.push_integer(3); // version
         auth_pos = buf.len() - l0 - (sec_buf_len - auth_pos);
@@ -1472,6 +1474,7 @@ pub fn build_raw_v3(
 pub fn build_v3<VLS, ITM>(
     ident: u8,
     req_id: i32,
+    msg_id: i32,
     values: VLS,
     non_repeaters: u32,
     max_repetitions: u32,
@@ -1559,7 +1562,7 @@ where
                 buf.push_integer(3); // security_model
                 buf.push_octet_string(&[flags]); // flags
                 buf.push_integer(BUFFER_SIZE.try_into().unwrap()); // max_size
-                buf.push_integer(req_id.into()); // msg_id
+                buf.push_integer(msg_id.into()); // msg_id
             });
             buf.push_integer(3); // version
             auth_pos = buf.len() - l0 - (sec_buf_len - auth_pos);

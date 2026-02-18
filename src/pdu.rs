@@ -5,7 +5,7 @@ use std::{fmt, mem, ops, ptr};
 
 pub struct Buf {
     len: usize,
-    buf: [u8; BUFFER_SIZE],
+    buf: Box<[u8; BUFFER_SIZE]>,
 }
 
 impl fmt::Debug for Buf {
@@ -19,7 +19,7 @@ impl Default for Buf {
         Buf {
             len: 0,
             // buf: unsafe { mem::uninitialized() },
-            buf: {
+            buf: Box::new({
                 let mut buf: [std::mem::MaybeUninit<u8>; BUFFER_SIZE] =
                     unsafe { std::mem::MaybeUninit::uninit().assume_init() };
                 for elem in &mut buf[..] {
@@ -28,7 +28,7 @@ impl Default for Buf {
                     }
                 }
                 unsafe { std::mem::transmute::<_, [u8; BUFFER_SIZE]>(buf) }
-            },
+            }),
         }
     }
 }
@@ -417,6 +417,7 @@ pub fn build<VLS, ITM>(
     ident: u8,
     security: &SnmpSecurity,
     req_id: i32,
+    msg_id: i32,
     values: VLS,
     u1: u32,
     u2: u32,
@@ -442,25 +443,35 @@ where
             *version as i32,
         ),
         #[cfg(feature = "v3")]
-        SnmpCredentials::V3(ref sec) => {
-            crate::v3::build_v3(ident, req_id, values, u1, u2, buf, sec, &security.state)
-        }
+        SnmpCredentials::V3(ref sec) => crate::v3::build_v3(
+            ident,
+            req_id,
+            msg_id,
+            values,
+            u1,
+            u2,
+            buf,
+            sec,
+            &security.state,
+        ),
     }
 }
 pub fn build_get<ITM>(
     security: &SnmpSecurity,
     req_id: i32,
+    msg_id: i32,
     name: ITM,
     buf: &mut Buf,
 ) -> SnmpResult<()>
 where
     ITM: VarbindOid,
 {
-    build(snmp::MSG_GET, security, req_id, [name], 0, 0, buf)
+    build(snmp::MSG_GET, security, req_id, msg_id, [name], 0, 0, buf)
 }
 pub fn build_getmulti<NAMES, ITM>(
     security: &SnmpSecurity,
     req_id: i32,
+    msg_id: i32,
     names: NAMES,
     buf: &mut Buf,
 ) -> SnmpResult<()>
@@ -469,7 +480,7 @@ where
     NAMES::IntoIter: DoubleEndedIterator,
     ITM: VarbindOid,
 {
-    build(snmp::MSG_GET, security, req_id, names, 0, 0, buf)
+    build(snmp::MSG_GET, security, req_id, msg_id, names, 0, 0, buf)
 }
 fn push_version(buf: &mut Buf, version: i32) {
     match version {
@@ -482,18 +493,29 @@ fn push_version(buf: &mut Buf, version: i32) {
 pub fn build_getnext<ITM>(
     security: &SnmpSecurity,
     req_id: i32,
+    msg_id: i32,
     name: ITM,
     buf: &mut Buf,
 ) -> SnmpResult<()>
 where
     ITM: VarbindOid,
 {
-    build(snmp::MSG_GET_NEXT, security, req_id, [name], 0, 0, buf)
+    build(
+        snmp::MSG_GET_NEXT,
+        security,
+        req_id,
+        msg_id,
+        [name],
+        0,
+        0,
+        buf,
+    )
 }
 
 pub fn build_getbulk<NAMES, ITM>(
     security: &SnmpSecurity,
     req_id: i32,
+    msg_id: i32,
     names: NAMES,
     non_repeaters: u32,
     max_repetitions: u32,
@@ -508,6 +530,7 @@ where
         snmp::MSG_GET_BULK,
         security,
         req_id,
+        msg_id,
         names,
         non_repeaters,
         max_repetitions,
@@ -518,6 +541,7 @@ where
 pub fn build_set<NAMES, ITM>(
     security: &SnmpSecurity,
     req_id: i32,
+    msg_id: i32,
     values: NAMES,
     buf: &mut Buf,
 ) -> SnmpResult<()>
@@ -526,12 +550,13 @@ where
     NAMES::IntoIter: DoubleEndedIterator,
     ITM: VarbindOid,
 {
-    build(snmp::MSG_SET, security, req_id, values, 0, 0, buf)
+    build(snmp::MSG_SET, security, req_id, msg_id, values, 0, 0, buf)
 }
 
 pub fn build_response<NAMES, ITM>(
     security: &SnmpSecurity,
     req_id: i32,
+    msg_id: i32,
     values: NAMES,
     buf: &mut Buf,
 ) -> SnmpResult<()>
@@ -540,5 +565,14 @@ where
     NAMES::IntoIter: DoubleEndedIterator,
     ITM: crate::VarbindOid,
 {
-    build(snmp::MSG_RESPONSE, security, req_id, values, 0, 0, buf)
+    build(
+        snmp::MSG_RESPONSE,
+        security,
+        req_id,
+        msg_id,
+        values,
+        0,
+        0,
+        buf,
+    )
 }

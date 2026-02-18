@@ -1,6 +1,6 @@
 use crate::{
     asn1, get_oid_array, pdu, AsnReader, ObjectIdentifier, SnmpCredentials, SnmpError,
-    SnmpMessageType, SnmpResult, SnmpSecurity, Value, VarbindOid, Varbinds,
+    SnmpMessageType, SnmpResult, SnmpSecurity, Value, VarbindOid, Varbinds, BUFFER_SIZE,
 };
 
 use std::collections::BTreeMap;
@@ -13,7 +13,6 @@ use std::time::Instant;
 use tokio::net::{lookup_host, ToSocketAddrs, UdpSocket};
 use tokio::sync::mpsc::{channel, Receiver, Sender};
 use tokio::time::{self, Duration};
-const BUFFER_SIZE: usize = 4096;
 
 #[derive(Debug, Clone)]
 pub struct SnmpOwnedPdu {
@@ -325,6 +324,7 @@ impl SNMPSession {
         pdu::build_get(
             &self.security.read().unwrap(),
             self.req_id.0,
+            self.req_id.0,
             name,
             &mut self.send_pdu,
         )?;
@@ -346,6 +346,7 @@ impl SNMPSession {
         pdu::build_getmulti(
             &self.security.read().unwrap(),
             self.req_id.0,
+            self.req_id.0,
             names,
             &mut self.send_pdu,
         )?;
@@ -364,6 +365,7 @@ impl SNMPSession {
         self.check_security(timeout).await?;
         pdu::build_getnext(
             &self.security.read().unwrap(),
+            self.req_id.0,
             self.req_id.0,
             name,
             &mut self.send_pdu,
@@ -388,6 +390,7 @@ impl SNMPSession {
         self.check_security(timeout).await?;
         pdu::build_getbulk(
             &self.security.read().unwrap(),
+            self.req_id.0,
             self.req_id.0,
             names,
             non_repeaters,
@@ -424,6 +427,7 @@ impl SNMPSession {
         self.check_security(timeout).await?;
         pdu::build_set(
             &self.security.read().unwrap(),
+            self.req_id.0,
             self.req_id.0,
             values,
             &mut self.send_pdu,

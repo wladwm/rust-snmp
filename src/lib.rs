@@ -333,7 +333,7 @@ impl From<std::io::Error> for SnmpError {
 }
 pub type SnmpResult<T> = Result<T, SnmpError>;
 
-pub const BUFFER_SIZE: usize = 4096;
+pub const BUFFER_SIZE: usize = 65507;
 
 pub mod asn1 {
     // #![allow(dead_code, identity_op, eq_op)]

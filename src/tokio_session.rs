@@ -17,7 +17,7 @@ pub struct TokioSession {
     security: SnmpSecurity,
     req_id: Wrapping<i32>,
     send_pdu: pdu::Buf,
-    recv_buf: [u8; BUFFER_SIZE],
+    recv_buf: Box<[u8; BUFFER_SIZE]>,
 }
 
 impl TokioSession {
@@ -43,7 +43,7 @@ impl TokioSession {
             security: credentials.into(),
             req_id: Wrapping(starting_req_id),
             send_pdu: pdu::Buf::default(),
-            recv_buf: [0; BUFFER_SIZE],
+            recv_buf: Box::new([0; BUFFER_SIZE]),
         })
     }
     pub fn last_req_id(&self) -> i32 {
