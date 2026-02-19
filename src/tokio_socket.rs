@@ -457,17 +457,19 @@ impl SNMPSession {
 struct SNMPSessionBack {
     reqid: Arc<std::sync::atomic::AtomicI32>,
     txresp: Sender<SnmpOwnedPdu>,
+    #[cfg(feature = "v3")]
     security: Arc<std::sync::RwLock<SnmpSecurity>>,
 }
 impl SNMPSessionBack {
     fn new(
         reqid: Arc<std::sync::atomic::AtomicI32>,
         txresp: Sender<SnmpOwnedPdu>,
-        security: Arc<std::sync::RwLock<SnmpSecurity>>,
+        #[cfg(feature = "v3")] security: Arc<std::sync::RwLock<SnmpSecurity>>,
     ) -> SNMPSessionBack {
         SNMPSessionBack {
             reqid,
             txresp,
+            #[cfg(feature = "v3")]
             security,
         }
     }
@@ -524,9 +526,14 @@ impl SNMPSessionBacks {
     fn new(
         reqid: Arc<std::sync::atomic::AtomicI32>,
         txresp: Sender<SnmpOwnedPdu>,
-        security: Arc<std::sync::RwLock<SnmpSecurity>>,
+        #[cfg(feature = "v3")] security: Arc<std::sync::RwLock<SnmpSecurity>>,
     ) -> SNMPSessionBacks {
-        SNMPSessionBacks::Few(SNMPSessionBack::new(reqid, txresp, security))
+        SNMPSessionBacks::Few(SNMPSessionBack::new(
+            reqid,
+            txresp,
+            #[cfg(feature = "v3")]
+            security,
+        ))
     }
     fn push(&mut self, b: SNMPSessionBack) {
         if let SNMPSessionBacks::Many(m) = self {
@@ -691,7 +698,7 @@ pub struct SNMPSocket {
 }
 
 impl SNMPSocket {
-    pub async fn new() -> std::io::Result<Self> {
+    pub async fn new() -> SnmpResult<Self> {
         Ok(Self {
             inner: SNMPSocketInner::new().await?,
             recv_task: Arc::new(Mutex::new(None)),
@@ -711,17 +718,16 @@ impl SNMPSocket {
         hostaddr: SA,
         credentials: SnmpCredentials,
         mut starting_req_id: i32,
-    ) -> std::io::Result<SNMPSession> {
+    ) -> SnmpResult<SNMPSession> {
         let la = self.inner.socket.local_addr()?;
         let socketaddr = match lookup_host(&hostaddr)
             .await?
             .find(|a| (a.is_ipv4() && la.is_ipv4()) || (a.is_ipv6() && la.is_ipv6()))
         {
             None => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::AddrNotAvailable,
-                    "Lookup",
-                ))
+                return Err(
+                    std::io::Error::new(std::io::ErrorKind::AddrNotAvailable, "Lookup").into(),
+                )
             }
             Some(a) => a,
         };
@@ -732,7 +738,12 @@ impl SNMPSocket {
         if sess.get(&socketaddr).is_none() {
             sess.insert(
                 socketaddr,
-                SNMPSessionBacks::new(nreqid.clone(), tx, security.clone()),
+                SNMPSessionBacks::new(
+                    nreqid.clone(),
+                    tx,
+                    #[cfg(feature = "v3")]
+                    security.clone(),
+                ),
             );
         } else {
             let lng = sess.get(&socketaddr).unwrap().len();
@@ -741,7 +752,12 @@ impl SNMPSocket {
             };
             sess.get_mut(&socketaddr)
                 .unwrap()
-                .push(SNMPSessionBack::new(nreqid.clone(), tx, security.clone()));
+                .push(SNMPSessionBack::new(
+                    nreqid.clone(),
+                    tx,
+                    #[cfg(feature = "v3")]
+                    security.clone(),
+                ));
         }
         {
             let recv_task = self.recv_task.clone();
@@ -760,6 +776,60 @@ impl SNMPSocket {
             req_id: Wrapping(starting_req_id),
             need_reqid: nreqid,
             host: socketaddr,
+            rx,
+            send_pdu: pdu::Buf::default(),
+        })
+    }
+    pub async fn clone_session(
+        &self,
+        session: &SNMPSession,
+        mut starting_req_id_add: i32,
+    ) -> std::io::Result<SNMPSession> {
+        let mut sess = self.inner.sessions.write().unwrap();
+        let (tx, rx) = channel(100);
+        let need_reqid = Arc::new(std::sync::atomic::AtomicI32::new(0));
+        let security = session.security.clone();
+        let host = session.host.clone();
+        starting_req_id_add += session.req_id.0;
+        if sess.get(&host).is_none() {
+            sess.insert(
+                host,
+                SNMPSessionBacks::new(
+                    need_reqid.clone(),
+                    tx,
+                    #[cfg(feature = "v3")]
+                    security.clone(),
+                ),
+            );
+        } else {
+            let lng = sess.get(&host).unwrap().len();
+            if starting_req_id_add < 2 && lng > 0 {
+                starting_req_id_add = (lng * 100) as i32;
+            };
+            sess.get_mut(&host).unwrap().push(SNMPSessionBack::new(
+                need_reqid.clone(),
+                tx,
+                #[cfg(feature = "v3")]
+                security.clone(),
+            ));
+        }
+        {
+            let recv_task = self.recv_task.clone();
+            let mut rt_g = self.recv_task.lock().unwrap();
+            let inner = self.inner.clone();
+            if rt_g.is_none() {
+                *rt_g = Some(tokio::spawn(async move {
+                    inner.run().await;
+                    recv_task.lock().unwrap().take();
+                }));
+            }
+        }
+        Ok(SNMPSession {
+            socket: self.inner.socket.clone(),
+            security,
+            req_id: Wrapping(starting_req_id_add),
+            need_reqid,
+            host: session.host.clone(),
             rx,
             send_pdu: pdu::Buf::default(),
         })
