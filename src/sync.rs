@@ -52,7 +52,7 @@ impl SyncSession {
                     return Ok(());
                 }
                 let req_id = self.req_id.0;
-                v3::build_init(req_id, &mut self.send_pdu);
+                v3::build_init(req_id, req_id, &mut self.send_pdu);
                 let recv_len = Self::send_and_recv_repeat(
                     &self.socket,
                     &self.send_pdu,
