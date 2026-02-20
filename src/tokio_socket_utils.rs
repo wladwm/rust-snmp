@@ -48,7 +48,7 @@ impl<'a, 'b> SnmpWalkInner<'a, 'b> {
     async fn getnext(self) -> Result<(SnmpOwnedPdu, SnmpWalkInner<'a, 'b>), SnmpError> {
         let rsp = match if self.params.bulk > 1 {
             self.sess
-                .getbulk(
+                .getbulk::<&[u32], &[u32], _>(
                     [&self.reqnext[..]],
                     0,
                     self.params.bulk,
@@ -58,8 +58,8 @@ impl<'a, 'b> SnmpWalkInner<'a, 'b> {
                 .await
         } else {
             self.sess
-                .getnext(
-                    self.reqnext.as_slice(),
+                .getnext::<&[u32], &[u32]>(
+                    &self.reqnext.as_slice(),
                     self.params.tries,
                     self.params.timeout,
                 )

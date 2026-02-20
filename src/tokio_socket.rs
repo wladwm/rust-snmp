@@ -1,6 +1,6 @@
 use crate::{
-    asn1, get_oid_array, pdu, AsnReader, ObjectIdentifier, SnmpCredentials, SnmpError,
-    SnmpMessageType, SnmpResult, SnmpSecurity, Value, VarbindOid, Varbinds, BUFFER_SIZE,
+    asn1, pdu, AsnReader, ObjectIdentifier, SnmpCredentials, SnmpError, SnmpMessageType,
+    SnmpResult, SnmpSecurity, Value, VarbindOid, Varbinds, BUFFER_SIZE,
 };
 
 use std::collections::BTreeMap;
@@ -195,6 +195,8 @@ pub struct SNMPSession {
     need_reqid: Arc<std::sync::atomic::AtomicI32>,
     rx: Receiver<SnmpOwnedPdu>,
     send_pdu: pdu::Buf,
+    is_v3: bool,
+    v3_msg_id: Wrapping<i32>,
 }
 impl SNMPSession {
     pub fn host(&self) -> &SocketAddr {
@@ -237,12 +239,17 @@ impl SNMPSession {
         self.socket.set_send_limit(limit_pps).await;
     }
     async fn send_and_recv_timeout(&mut self, timeout: Duration) -> SnmpResult<SnmpOwnedPdu> {
+        // flush late packets
         while self.rx.try_recv().is_ok() {}
         let _sent_bytes = match self.socket.send_to(&self.send_pdu[..], self.host).await {
             Err(e) => {
                 return Err(SnmpError::SendError(format!("{}", e)));
             }
             Ok(sendres) => sendres,
+        };
+        #[cfg(feature = "v3")]
+        if self.is_v3 {
+            self.v3_msg_id += Wrapping(1);
         };
         match time::timeout(timeout, self.rx.recv()).await {
             Err(_) => Err(SnmpError::Timeout),
@@ -278,7 +285,7 @@ impl SNMPSession {
                     (*swg).state.correct_authoritative_engine_time();
                     return Ok(());
                 }
-                crate::v3::build_init(self.req_id.0, self.req_id.0, &mut self.send_pdu);
+                crate::v3::build_init(self.req_id.0, self.v3_msg_id.0, &mut self.send_pdu);
             }
             let resp = self.send_and_recv_repeat(1, timeout).await?;
             self.req_id += Wrapping(1);
@@ -299,6 +306,7 @@ impl SNMPSession {
         }
     }
 
+    #[cfg(not(feature = "v3"))]
     async fn send_and_get(&mut self, repeat: u32, timeout: Duration) -> SnmpResult<SnmpOwnedPdu> {
         let req_id = self.req_id.0;
         self.need_reqid
@@ -313,91 +321,224 @@ impl SNMPSession {
         }
         Ok(rpdu)
     }
-    pub async fn get(
+    pub async fn get<ITM, ITMB>(
         &mut self,
-        name: &[u32],
-        repeat: u32,
-        timeout: Duration,
-    ) -> SnmpResult<SnmpOwnedPdu> {
-        #[cfg(feature = "v3")]
-        self.check_security(timeout).await?;
-        pdu::build_get(
-            &self.security.read().unwrap(),
-            self.req_id.0,
-            self.req_id.0,
-            name,
-            &mut self.send_pdu,
-        )?;
-        self.send_and_get(repeat, timeout).await
-    }
-    pub async fn getmulti<NAMES, ITM>(
-        &mut self,
-        names: NAMES,
+        name: ITMB,
         repeat: u32,
         timeout: Duration,
     ) -> SnmpResult<SnmpOwnedPdu>
     where
-        NAMES: std::iter::IntoIterator<Item = ITM>,
-        NAMES::IntoIter: DoubleEndedIterator,
+        ITMB: std::borrow::Borrow<ITM> + Clone,
         ITM: VarbindOid,
     {
         #[cfg(feature = "v3")]
-        self.check_security(timeout).await?;
-        pdu::build_getmulti(
-            &self.security.read().unwrap(),
-            self.req_id.0,
-            self.req_id.0,
-            names,
-            &mut self.send_pdu,
-        )?;
-        self.send_and_get(repeat, timeout).await
+        {
+            self.check_security(timeout).await?;
+            let mut err = SnmpError::Timeout;
+            let req_id = self.req_id.0;
+            self.need_reqid
+                .store(req_id, std::sync::atomic::Ordering::Relaxed);
+            self.req_id += Wrapping(1);
+            for _ in 0..repeat {
+                pdu::build_get(
+                    &self.security.read().unwrap(),
+                    req_id,
+                    self.v3_msg_id.0,
+                    name.clone(),
+                    &mut self.send_pdu,
+                )?;
+                match self.send_and_recv_timeout(timeout).await {
+                    Err(e) => {
+                        err = e;
+                        match err {
+                            SnmpError::Timeout => continue,
+                            SnmpError::RequestIdMismatch => continue, //late reply
+                            other => return Err(other),
+                        }
+                    }
+                    Ok(result) => return Ok(result),
+                }
+            }
+            Err(err)
+        }
+        #[cfg(not(feature = "v3"))]
+        {
+            pdu::build_get(
+                &self.security.read().unwrap(),
+                self.req_id.0,
+                self.req_id.0,
+                name.clone(),
+                &mut self.send_pdu,
+            )?;
+            self.send_and_get(repeat, timeout).await
+        }
     }
-    pub async fn getnext<ITM>(
+    pub async fn getmulti<ITM, ITMB, VLS>(
         &mut self,
-        name: ITM,
+        names: VLS,
         repeat: u32,
         timeout: Duration,
     ) -> SnmpResult<SnmpOwnedPdu>
     where
+        VLS: std::iter::IntoIterator<Item = ITMB> + Clone,
+        VLS::IntoIter: DoubleEndedIterator,
+        ITMB: std::borrow::Borrow<ITM>,
         ITM: VarbindOid,
     {
         #[cfg(feature = "v3")]
-        self.check_security(timeout).await?;
-        pdu::build_getnext(
-            &self.security.read().unwrap(),
-            self.req_id.0,
-            self.req_id.0,
-            name,
-            &mut self.send_pdu,
-        )?;
-        self.send_and_get(repeat, timeout).await
+        {
+            self.check_security(timeout).await?;
+            let req_id = self.req_id.0;
+            self.need_reqid
+                .store(req_id, std::sync::atomic::Ordering::Relaxed);
+            self.req_id += Wrapping(1);
+            let mut err = SnmpError::Timeout;
+            for _ in 0..repeat {
+                pdu::build_getmulti(
+                    &self.security.read().unwrap(),
+                    req_id,
+                    self.v3_msg_id.0,
+                    names.clone(),
+                    &mut self.send_pdu,
+                )?;
+                match self.send_and_recv_timeout(timeout).await {
+                    Err(e) => {
+                        err = e;
+                        match err {
+                            SnmpError::Timeout => continue,
+                            SnmpError::RequestIdMismatch => continue, //late reply
+                            other => return Err(other),
+                        }
+                    }
+                    Ok(result) => return Ok(result),
+                }
+            }
+            Err(err)
+        }
+        #[cfg(not(feature = "v3"))]
+        {
+            pdu::build_getmulti(
+                &self.security.read().unwrap(),
+                self.req_id.0,
+                self.req_id.0,
+                names.clone(),
+                &mut self.send_pdu,
+            )?;
+            self.send_and_get(repeat, timeout).await
+        }
+    }
+    pub async fn getnext<ITM, ITMB>(
+        &mut self,
+        name: ITMB,
+        repeat: u32,
+        timeout: Duration,
+    ) -> SnmpResult<SnmpOwnedPdu>
+    where
+        ITMB: std::borrow::Borrow<ITM> + Clone,
+        ITM: VarbindOid,
+    {
+        #[cfg(feature = "v3")]
+        {
+            self.check_security(timeout).await?;
+            let req_id = self.req_id.0;
+            self.need_reqid
+                .store(req_id, std::sync::atomic::Ordering::Relaxed);
+            self.req_id += Wrapping(1);
+            let mut err = SnmpError::Timeout;
+            for _ in 0..repeat {
+                pdu::build_getnext(
+                    &self.security.read().unwrap(),
+                    req_id,
+                    self.v3_msg_id.0,
+                    name.clone(),
+                    &mut self.send_pdu,
+                )?;
+                match self.send_and_recv_timeout(timeout).await {
+                    Err(e) => {
+                        err = e;
+                        match err {
+                            SnmpError::Timeout => continue,
+                            SnmpError::RequestIdMismatch => continue, //late reply
+                            other => return Err(other),
+                        }
+                    }
+                    Ok(result) => return Ok(result),
+                }
+            }
+            Err(err)
+        }
+        #[cfg(not(feature = "v3"))]
+        {
+            pdu::build_getnext(
+                &self.security.read().unwrap(),
+                self.req_id.0,
+                self.req_id.0,
+                name.clone(),
+                &mut self.send_pdu,
+            )?;
+            self.send_and_get(repeat, timeout).await
+        }
     }
 
-    pub async fn getbulk<NAMES, ITM>(
+    pub async fn getbulk<ITM, ITMB, VLS>(
         &mut self,
-        names: NAMES,
+        names: VLS,
         non_repeaters: u32,
         max_repetitions: u32,
         repeat: u32,
         timeout: Duration,
     ) -> SnmpResult<SnmpOwnedPdu>
     where
-        NAMES: std::iter::IntoIterator<Item = ITM>,
-        NAMES::IntoIter: DoubleEndedIterator,
+        VLS: std::iter::IntoIterator<Item = ITMB> + Clone,
+        VLS::IntoIter: DoubleEndedIterator,
+        ITMB: std::borrow::Borrow<ITM>,
         ITM: VarbindOid,
     {
         #[cfg(feature = "v3")]
-        self.check_security(timeout).await?;
-        pdu::build_getbulk(
-            &self.security.read().unwrap(),
-            self.req_id.0,
-            self.req_id.0,
-            names,
-            non_repeaters,
-            max_repetitions,
-            &mut self.send_pdu,
-        )?;
-        self.send_and_get(repeat, timeout).await
+        {
+            self.check_security(timeout).await?;
+            let req_id = self.req_id.0;
+            self.need_reqid
+                .store(req_id, std::sync::atomic::Ordering::Relaxed);
+            self.req_id += Wrapping(1);
+            let mut err = SnmpError::Timeout;
+            for _ in 0..repeat {
+                pdu::build_getbulk(
+                    &self.security.read().unwrap(),
+                    req_id,
+                    self.v3_msg_id.0,
+                    names.clone(),
+                    non_repeaters,
+                    max_repetitions,
+                    &mut self.send_pdu,
+                )?;
+                match self.send_and_recv_timeout(timeout).await {
+                    Err(e) => {
+                        err = e;
+                        match err {
+                            SnmpError::Timeout => continue,
+                            SnmpError::RequestIdMismatch => continue, //late reply
+                            other => return Err(other),
+                        }
+                    }
+                    Ok(result) => return Ok(result),
+                }
+            }
+            Err(err)
+        }
+        #[cfg(not(feature = "v3"))]
+        {
+            pdu::build_getbulk(
+                &self.security.read().unwrap(),
+                self.req_id.0,
+                self.req_id.0,
+                names.clone(),
+                non_repeaters,
+                max_repetitions,
+                &mut self.send_pdu,
+            )?;
+            self.send_and_get(repeat, timeout).await
+        }
     }
 
     /// # Panics if any of the values are not one of these supported types:
@@ -412,45 +553,59 @@ impl SNMPSession {
     ///   - `Timeticks`
     ///   - `Opaque`
     ///   - `Counter64`
-    pub async fn set<NAMES, ITM>(
+    pub async fn set<VLS, ITMB, ITM>(
         &mut self,
-        values: NAMES, //&[(&[u32], Value<'_>)],
+        values: VLS,
         repeat: u32,
         timeout: Duration,
     ) -> SnmpResult<SnmpOwnedPdu>
     where
-        NAMES: std::iter::IntoIterator<Item = ITM>,
-        NAMES::IntoIter: DoubleEndedIterator,
-        ITM: crate::VarbindOid,
+        VLS: std::iter::IntoIterator<Item = ITMB> + Clone,
+        VLS::IntoIter: DoubleEndedIterator,
+        ITMB: std::borrow::Borrow<ITM>,
+        ITM: VarbindOid,
     {
         #[cfg(feature = "v3")]
-        self.check_security(timeout).await?;
-        pdu::build_set(
-            &self.security.read().unwrap(),
-            self.req_id.0,
-            self.req_id.0,
-            values,
-            &mut self.send_pdu,
-        )?;
-        self.send_and_get(repeat, timeout).await
-    }
-    pub async fn get_oid(
-        &mut self,
-        oid: &str,
-        repeat: u32,
-        timeout: Duration,
-    ) -> SnmpResult<SnmpOwnedPdu> {
-        self.get(get_oid_array(oid).as_slice(), repeat, timeout)
-            .await
-    }
-    pub async fn get_oid_next(
-        &mut self,
-        oid: &str,
-        repeat: u32,
-        timeout: Duration,
-    ) -> SnmpResult<SnmpOwnedPdu> {
-        self.getnext(get_oid_array(oid).as_slice(), repeat, timeout)
-            .await
+        {
+            self.check_security(timeout).await?;
+            let req_id = self.req_id.0;
+            self.need_reqid
+                .store(req_id, std::sync::atomic::Ordering::Relaxed);
+            self.req_id += Wrapping(1);
+            let mut err = SnmpError::Timeout;
+            for _ in 0..repeat {
+                pdu::build_set(
+                    &self.security.read().unwrap(),
+                    self.req_id.0,
+                    self.v3_msg_id.0,
+                    values.clone(),
+                    &mut self.send_pdu,
+                )?;
+                match self.send_and_recv_timeout(timeout).await {
+                    Err(e) => {
+                        err = e;
+                        match err {
+                            SnmpError::Timeout => continue,
+                            SnmpError::RequestIdMismatch => continue, //late reply
+                            other => return Err(other),
+                        }
+                    }
+                    Ok(result) => return Ok(result),
+                }
+            }
+            Err(err)
+        }
+        #[cfg(not(feature = "v3"))]
+        {
+            pdu::build_set(
+                &self.security.read().unwrap(),
+                self.req_id.0,
+                self.v3_msg_id.0,
+                values,
+                &mut self.send_pdu,
+            )?;
+            self.send_and_get(repeat, timeout).await
+        }
     }
 }
 
@@ -508,6 +663,11 @@ impl SNMPSessionBack {
                 crate::v3::AuthErrorKind::UnsupportedUSM,
             ));
         }
+        eprintln!(
+            "send_response {:?} need reqid {}",
+            pdu,
+            self.reqid.load(std::sync::atomic::Ordering::Relaxed)
+        );
         if pdu.req_id != self.reqid.load(std::sync::atomic::Ordering::Relaxed) {
             return Ok(());
         }
@@ -672,7 +832,7 @@ impl SNMPSocketInner {
     }
     async fn recv_one(&self, buf: &mut [u8]) -> std::io::Result<()> {
         let (len, addr) = self.socket.recv_from(buf).await?;
-
+        eprintln!("recv_one from {} - {:?}", addr, &buf[..len]);
         let res = match self.sessions.read().unwrap().get(&addr) {
             None => {
                 warn!("Unknown host {:?} - {} bytes received from", addr, len);
@@ -734,6 +894,7 @@ impl SNMPSocket {
         let mut sess = self.inner.sessions.write().unwrap();
         let (tx, rx) = channel(100);
         let nreqid = Arc::new(std::sync::atomic::AtomicI32::new(0));
+        let is_v3 = credentials.version() == 3;
         let security = Arc::new(std::sync::RwLock::new(SnmpSecurity::from(credentials)));
         if sess.get(&socketaddr).is_none() {
             sess.insert(
@@ -772,12 +933,14 @@ impl SNMPSocket {
         }
         Ok(SNMPSession {
             socket: self.inner.socket.clone(),
+            is_v3,
             security,
             req_id: Wrapping(starting_req_id),
             need_reqid: nreqid,
             host: socketaddr,
             rx,
             send_pdu: pdu::Buf::default(),
+            v3_msg_id: Wrapping(1i32),
         })
     }
     pub async fn clone_session(
@@ -832,6 +995,8 @@ impl SNMPSocket {
             host: session.host.clone(),
             rx,
             send_pdu: pdu::Buf::default(),
+            is_v3: session.is_v3,
+            v3_msg_id: Wrapping(1i32),
         })
     }
 }

@@ -448,13 +448,13 @@ impl AsOidRaw for &[u8] {
 
 pub trait VarbindOid {
     fn oid<'a>(&'a self) -> &'a [u32];
-    fn value<'a>(&'a self) -> Option<&'a Value<'_>>;
+    fn value<'a>(&'a self) -> Option<&'a Value<'a>>;
 }
 impl VarbindOid for &[u32] {
     fn oid<'a>(&'a self) -> &'a [u32] {
         self
     }
-    fn value<'a>(&'a self) -> Option<&'a Value<'_>> {
+    fn value<'a>(&'a self) -> Option<&'a Value<'a>> {
         None
     }
 }
@@ -462,7 +462,7 @@ impl VarbindOid for &&[u32] {
     fn oid<'a>(&'a self) -> &'a [u32] {
         *self
     }
-    fn value<'a>(&'a self) -> Option<&'a Value<'_>> {
+    fn value<'a>(&'a self) -> Option<&'a Value<'a>> {
         None
     }
 }
@@ -470,7 +470,7 @@ impl VarbindOid for [u32] {
     fn oid<'a>(&'a self) -> &'a [u32] {
         self
     }
-    fn value<'a>(&'a self) -> Option<&'a Value<'_>> {
+    fn value<'a>(&'a self) -> Option<&'a Value<'a>> {
         None
     }
 }
@@ -478,7 +478,7 @@ impl VarbindOid for Vec<u32> {
     fn oid<'a>(&'a self) -> &'a [u32] {
         &self
     }
-    fn value<'a>(&'a self) -> Option<&'a Value<'_>> {
+    fn value<'a>(&'a self) -> Option<&'a Value<'a>> {
         None
     }
 }

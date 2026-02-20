@@ -33,15 +33,16 @@ fn test() -> SnmpResult<()> {
         }
     };
     let mut sess = SyncSession::new(scka, sec, None, 100)?;
-    let pdu = sess.get(&[1u32, 3, 6, 1, 2, 1, 1, 1, 0], 1)?;
+    let pdu = sess.get::<&[u32], &[u32]>(&[1u32, 3, 6, 1, 2, 1, 1, 1, 0], 1)?;
     println!("{:?}", pdu);
-    let pdu = sess.getbulk(
+    let pdu = sess.getbulk::<&[u32], &[u32], _>(
         [
             [1u32, 3, 6, 1, 2, 1, 1, 5].as_slice(),
             [1u32, 3, 6, 1, 2, 1, 31, 1, 1, 1, 1].as_slice(),
         ],
         1,
         100,
+        2,
     )?;
     println!("{:?}", pdu);
     Ok(())

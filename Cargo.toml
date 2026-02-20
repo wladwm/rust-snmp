@@ -20,7 +20,7 @@ v3 = ["openssl"]
 localdes = ["easydes"]
 
 [dependencies]
-tokio = { version="1", features = ["net","macros"], optional = true }
+tokio = { version="1", features = ["net","macros","time","rt"], optional = true }
 tokio-test = { version = "0.4", optional = true} 
 tokio-util = { version = "0", features = [ "codec" ] , optional = true }
 serde = { version = "1", features = ["derive"] }

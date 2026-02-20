@@ -29,13 +29,13 @@ async fn test(device: &str, security: &str) -> SnmpResult<()> {
     let timeout = std::time::Duration::from_secs(10);
     println!("sysDescr");
     let pdu = sess
-        .get(&[1u32, 3, 6, 1, 2, 1, 1, 1, 0], 1, timeout)
+        .get::<&[u32], &[u32]>(&[1u32, 3, 6, 1, 2, 1, 1, 1, 0][..], 1, timeout)
         .await?;
     println!("{:?}", pdu);
     print_vars(&pdu);
     println!("sysName+ifName");
     let pdu = sess
-        .getbulk(
+        .getbulk::<&[u32], &[u32], _>(
             [
                 [1u32, 3, 6, 1, 2, 1, 1, 5].as_slice(),
                 [1u32, 3, 6, 1, 2, 1, 31, 1, 1, 1, 1].as_slice(),

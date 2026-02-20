@@ -5,11 +5,11 @@ use super::{AsnReader, SnmpCredentials, SnmpError, SnmpSecurity};
 fn build_getnext_pdu() {
     let mut pdu = pdu::Buf::default();
     let sec = SnmpSecurity::from(SnmpCredentials::new_v12(1, b"tyS0n43d".to_vec()));
-    pdu::build_getnext(
+    pdu::build_getnext::<&[u32], &[u32]>(
         &sec,
         1251699618,
         0,
-        [1u32, 3, 6, 1, 2, 1, 1, 1, 0],
+        &[1u32, 3, 6, 1, 2, 1, 1, 1, 0][..],
         &mut pdu,
     )
     .unwrap();

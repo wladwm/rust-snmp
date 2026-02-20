@@ -843,7 +843,7 @@ impl Security {
         self
     }
 
-    pub(crate) fn another_key_extension_method(&mut self) -> Option<KeyExtension> {
+    pub fn another_key_extension_method(&mut self) -> Option<KeyExtension> {
         if let Auth::AuthPriv { ref cipher, .. } = self.auth {
             if cipher.priv_key_needs_extension(&self.auth_protocol) {
                 if let Some(used_method) = self.key_extension_method.clone() {
@@ -1392,12 +1392,12 @@ pub fn build_init_report(
         message.push_sequence(|pdu| {
             pdu.push_constructed(snmp::MSG_REPORT, |req| {
                 //req.push_sequence(|_varbinds| {});
-                crate::pdu::push_varbinds_oid(
+                crate::pdu::push_varbinds_oid::<(&[u32], crate::Value<'_>), _, _>(
                     req,
                     &[(
                         [1u32, 3, 5, 1, 6, 3, 15, 1, 1, 4, 0].as_slice(),
                         crate::Value::Counter32(0),
-                    )],
+                    )][..],
                 );
                 req.push_integer(0); // error index
                 req.push_integer(0); // error status
@@ -1506,7 +1506,7 @@ pub fn build_raw_v3(
     Ok(())
 }
 
-pub fn build_v3<VLS, ITM>(
+pub fn build_v3<ITM, ITMB, VLS>(
     ident: u8,
     req_id: i32,
     msg_id: i32,
@@ -1518,8 +1518,9 @@ pub fn build_v3<VLS, ITM>(
     auth_state: &AuthoritativeState,
 ) -> SnmpResult<()>
 where
-    VLS: std::iter::IntoIterator<Item = ITM>,
+    VLS: std::iter::IntoIterator<Item = ITMB>,
     VLS::IntoIter: DoubleEndedIterator,
+    ITMB: std::borrow::Borrow<ITM>,
     ITM: VarbindOid,
 {
     let truncation_len = security.auth_protocol.truncation_length();
