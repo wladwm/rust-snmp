@@ -663,11 +663,6 @@ impl SNMPSessionBack {
                 crate::v3::AuthErrorKind::UnsupportedUSM,
             ));
         }
-        eprintln!(
-            "send_response {:?} need reqid {}",
-            pdu,
-            self.reqid.load(std::sync::atomic::Ordering::Relaxed)
-        );
         if pdu.req_id != self.reqid.load(std::sync::atomic::Ordering::Relaxed) {
             return Ok(());
         }
@@ -832,7 +827,6 @@ impl SNMPSocketInner {
     }
     async fn recv_one(&self, buf: &mut [u8]) -> std::io::Result<()> {
         let (len, addr) = self.socket.recv_from(buf).await?;
-        eprintln!("recv_one from {} - {:?}", addr, &buf[..len]);
         let res = match self.sessions.read().unwrap().get(&addr) {
             None => {
                 warn!("Unknown host {:?} - {} bytes received from", addr, len);
