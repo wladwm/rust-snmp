@@ -294,14 +294,16 @@ impl TokioSession {
             Ok(resp)
         }
     }
-    pub async fn getnext<ITM, ITMB>(
+    pub async fn getnext<ITM, ITMB, VLS>(
         &mut self,
-        name: ITMB,
+        names: VLS,
         repeat: u32,
         timeout: Duration,
     ) -> SnmpResult<SnmpPdu<'_>>
-    where
-        ITMB: std::borrow::Borrow<ITM> + Clone,
+     where
+        VLS: std::iter::IntoIterator<Item = ITMB> + Clone,
+        VLS::IntoIter: DoubleEndedIterator,
+        ITMB: std::borrow::Borrow<ITM>,
         ITM: VarbindOid,
     {
         #[cfg(feature = "v3")]
@@ -315,7 +317,7 @@ impl TokioSession {
                     &self.security,
                     req_id,
                     self.v3_msg_id.0,
-                    name.clone(),
+                    names.clone(),
                     &mut self.send_pdu,
                 )?;
                 match self.send_and_recv_timeout(timeout).await {
@@ -335,7 +337,7 @@ impl TokioSession {
         #[cfg(not(feature = "v3"))]
         {
             let req_id = self.req_id.0;
-            pdu::build_getnext(&self.security, req_id, req_id, name, &mut self.send_pdu)?;
+            pdu::build_getnext(&self.security, req_id, req_id, names, &mut self.send_pdu)?;
             let recv_len = selfsend_and_recv_repeat(repeat, timeout).await?;
             self.req_id += Wrapping(1);
             let resp = self.getpdu(recv_len)?;

@@ -497,14 +497,16 @@ fn push_version(buf: &mut Buf, version: i32) {
         _ => buf.push_integer(snmp::VERSION_1 as i64),
     }
 }
-pub fn build_getnext<ITM, ITMB>(
+pub fn build_getnext<ITM, ITMB, VLS>(
     security: &SnmpSecurity,
     req_id: i32,
     msg_id: i32,
-    name: ITMB,
+    names: VLS,
     buf: &mut Buf,
 ) -> SnmpResult<()>
 where
+    VLS: std::iter::IntoIterator<Item = ITMB>,
+    VLS::IntoIter: DoubleEndedIterator,
     ITMB: std::borrow::Borrow<ITM>,
     ITM: VarbindOid,
 {
@@ -513,7 +515,7 @@ where
         security,
         req_id,
         msg_id,
-        [name],
+        names,
         0,
         0,
         buf,

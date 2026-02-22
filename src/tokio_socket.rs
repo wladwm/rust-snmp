@@ -427,14 +427,16 @@ impl SNMPSession {
             self.send_and_get(repeat, timeout).await
         }
     }
-    pub async fn getnext<ITM, ITMB>(
+    pub async fn getnext<ITM, ITMB, VLS>(
         &mut self,
-        name: ITMB,
+        names: VLS,
         repeat: u32,
         timeout: Duration,
     ) -> SnmpResult<SnmpOwnedPdu>
     where
-        ITMB: std::borrow::Borrow<ITM> + Clone,
+        VLS: std::iter::IntoIterator<Item = ITMB> + Clone,
+        VLS::IntoIter: DoubleEndedIterator,
+        ITMB: std::borrow::Borrow<ITM>,
         ITM: VarbindOid,
     {
         #[cfg(feature = "v3")]
@@ -450,7 +452,7 @@ impl SNMPSession {
                     &self.security.read().unwrap(),
                     req_id,
                     self.v3_msg_id.0,
-                    name.clone(),
+                    names.clone(),
                     &mut self.send_pdu,
                 )?;
                 match self.send_and_recv_timeout(timeout).await {
@@ -473,7 +475,7 @@ impl SNMPSession {
                 &self.security.read().unwrap(),
                 self.req_id.0,
                 self.req_id.0,
-                name.clone(),
+                names.clone(),
                 &mut self.send_pdu,
             )?;
             self.send_and_get(repeat, timeout).await

@@ -58,8 +58,8 @@ impl<'a, 'b> SnmpWalkInner<'a, 'b> {
                 .await
         } else {
             self.sess
-                .getnext::<&[u32], &[u32]>(
-                    &self.reqnext.as_slice(),
+                .getnext::<&[u32], &[u32], _>(
+                    [&self.reqnext[..]],
                     self.params.tries,
                     self.params.timeout,
                 )
