@@ -170,7 +170,7 @@ impl SyncSession {
         names: VLS,
         repeat: u32,
     ) -> SnmpResult<SnmpPdu<'slf>>
-     where
+    where
         VLS: std::iter::IntoIterator<Item = ITMB> + Clone,
         VLS::IntoIter: DoubleEndedIterator,
         ITMB: std::borrow::Borrow<ITM>,
