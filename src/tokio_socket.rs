@@ -193,7 +193,7 @@ pub struct SNMPSession {
     req_id: Wrapping<i32>,
     pub host: SocketAddr,
     need_reqid: Arc<std::sync::atomic::AtomicI32>,
-    rx: Receiver<SnmpOwnedPdu>,
+    rx: Receiver<SnmpResult<SnmpOwnedPdu>>,
     send_pdu: pdu::Buf,
     is_v3: bool,
     v3_msg_id: Wrapping<i32>,
@@ -255,7 +255,7 @@ impl SNMPSession {
             Err(_) => Err(SnmpError::Timeout),
             Ok(resio) => match resio {
                 None => Err(SnmpError::ReceiveError("Received None".to_string())),
-                Some(pdubuf) => Ok(pdubuf),
+                Some(pdubuf) => pdubuf,
             },
         }
     }
@@ -613,14 +613,14 @@ impl SNMPSession {
 
 struct SNMPSessionBack {
     reqid: Arc<std::sync::atomic::AtomicI32>,
-    txresp: Sender<SnmpOwnedPdu>,
+    txresp: Sender<SnmpResult<SnmpOwnedPdu>>,
     #[cfg(feature = "v3")]
     security: Arc<std::sync::RwLock<SnmpSecurity>>,
 }
 impl SNMPSessionBack {
     fn new(
         reqid: Arc<std::sync::atomic::AtomicI32>,
-        txresp: Sender<SnmpOwnedPdu>,
+        txresp: Sender<SnmpResult<SnmpOwnedPdu>>,
         #[cfg(feature = "v3")] security: Arc<std::sync::RwLock<SnmpSecurity>>,
     ) -> SNMPSessionBack {
         SNMPSessionBack {
@@ -647,32 +647,37 @@ impl SNMPSessionBack {
                 };
                 return self
                     .txresp
-                    .try_send(resp)
+                    .try_send(Ok(resp))
                     .map_err(|_| SnmpError::ChannelOverflow);
             }
         }
         let mut sb = crate::v3::SecurityBuf::default();
-        let pdu;
-        if let SnmpSecurity {
+        let rpdu = if let SnmpSecurity {
             credentials: SnmpCredentials::V3(v3),
             state,
         } = &mut (*sec)
         {
-            pdu =
-                crate::SnmpPdu::from_bytes_with_security(buf, Some(v3), Some(state), Some(&mut sb))?
+            crate::SnmpPdu::from_bytes_with_security(buf, Some(v3), Some(state), Some(&mut sb))
         } else {
-            return Err(SnmpError::AuthFailure(
+            Err(SnmpError::AuthFailure(
                 crate::v3::AuthErrorKind::UnsupportedUSM,
-            ));
+            ))
+        };
+        match rpdu {
+            Err(e) => self
+                .txresp
+                .try_send(Err(e))
+                .map_err(|_| SnmpError::ChannelOverflow),
+            Ok(pdu) => {
+                if pdu.req_id != self.reqid.load(std::sync::atomic::Ordering::Relaxed) {
+                    return Ok(());
+                }
+                let resp = SnmpOwnedPdu::try_from(pdu)?;
+                self.txresp
+                    .try_send(Ok(resp))
+                    .map_err(|_| SnmpError::ChannelOverflow)
+            }
         }
-        if pdu.req_id != self.reqid.load(std::sync::atomic::Ordering::Relaxed) {
-            return Ok(());
-        }
-        let resp = SnmpOwnedPdu::try_from(pdu)?;
-        self.txresp
-            .try_send(resp)
-            .map_err(|_| SnmpError::ChannelOverflow)?;
-        Ok(())
     }
 }
 enum SNMPSessionBacks {
@@ -682,7 +687,7 @@ enum SNMPSessionBacks {
 impl SNMPSessionBacks {
     fn new(
         reqid: Arc<std::sync::atomic::AtomicI32>,
-        txresp: Sender<SnmpOwnedPdu>,
+        txresp: Sender<SnmpResult<SnmpOwnedPdu>>,
         #[cfg(feature = "v3")] security: Arc<std::sync::RwLock<SnmpSecurity>>,
     ) -> SNMPSessionBacks {
         SNMPSessionBacks::Few(SNMPSessionBack::new(
@@ -769,7 +774,7 @@ impl SNMPSessionBacks {
         if self.len() == 1 {
             let c = self.iter().next().unwrap();
             c.txresp
-                .try_send(rsp)
+                .try_send(Ok(rsp))
                 .map_err(|_| SnmpError::ChannelOverflow)
         } else {
             match self
@@ -778,7 +783,7 @@ impl SNMPSessionBacks {
             {
                 Some(c) => c
                     .txresp
-                    .try_send(rsp)
+                    .try_send(Ok(rsp))
                     .map_err(|_| SnmpError::ChannelOverflow),
                 None => return Ok(()), //Err(tokio::sync::mpsc::error::TrySendError::Closed(rsp)),
             }
@@ -820,14 +825,14 @@ impl SNMPSocketInner {
         let mbuf = buf.as_mut_slice();
         loop {
             if let Err(e) = self.recv_one(mbuf).await {
-                trace!("receive task error: {}", e);
+                error!("receive task error: {}", e);
                 break;
             }
         }
         self.clear_closed_sessions().await;
         trace!("receive task finished");
     }
-    async fn recv_one(&self, buf: &mut [u8]) -> std::io::Result<()> {
+    async fn recv_one(&self, buf: &mut [u8]) -> SnmpResult<()> {
         let (len, addr) = self.socket.recv_from(buf).await?;
         let res = match self.sessions.read().unwrap().get(&addr) {
             None => {
@@ -841,7 +846,7 @@ impl SNMPSocketInner {
             if self.clear_closed_sessions().await < 1 {
                 //stop receive task
                 trace!("No more sessions, closing receive task");
-                return Err(std::io::Error::new(std::io::ErrorKind::Other, e));
+                return Err(e);
             }
         };
         Ok(())

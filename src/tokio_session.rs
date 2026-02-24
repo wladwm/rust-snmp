@@ -300,7 +300,7 @@ impl TokioSession {
         repeat: u32,
         timeout: Duration,
     ) -> SnmpResult<SnmpPdu<'_>>
-     where
+    where
         VLS: std::iter::IntoIterator<Item = ITMB> + Clone,
         VLS::IntoIter: DoubleEndedIterator,
         ITMB: std::borrow::Borrow<ITM>,
