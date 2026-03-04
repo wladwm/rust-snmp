@@ -16,6 +16,16 @@ use crate::{
 };
 
 const ENGINE_TIME_WINDOW: i64 = 150;
+const AUTH_PROTOCOL_MD5: &str = "MD5";
+const AUTH_PROTOCOL_SHA1: &str = "SHA1";
+const AUTH_PROTOCOL_SHA224: &str = "SHA224";
+const AUTH_PROTOCOL_SHA256: &str = "SHA256";
+const AUTH_PROTOCOL_SHA384: &str = "SHA384";
+const AUTH_PROTOCOL_SHA512: &str = "SHA512";
+const CIPHER_DES: &str = "DES";
+const CIPHER_AES128: &str = "AES128";
+const CIPHER_AES192: &str = "AES192";
+const CIPHER_AES256: &str = "AES256";
 
 impl From<openssl::error::ErrorStack> for SnmpError {
     fn from(err: openssl::error::ErrorStack) -> SnmpError {
@@ -709,60 +719,58 @@ impl std::str::FromStr for Security {
             if kv.len() != 2 {
                 return Err(crate::SnmpError::Crypto(format!("Invalid term {}", term)));
             }
-            match kv[0] {
-                "user" | "username" | "login" => {
-                    ret.username = crate::unescape_ascii(kv[1]);
+            if kv[0].eq_ignore_ascii_case("user")
+                || kv[0].eq_ignore_ascii_case("username")
+                || kv[0].eq_ignore_ascii_case("login")
+            {
+                ret.username = crate::unescape_ascii(kv[1]);
+            } else if kv[0].eq_ignore_ascii_case("password")
+                || kv[0].eq_ignore_ascii_case("authentication_password")
+            {
+                ret.authentication_password = crate::unescape_ascii(kv[1]);
+            } else if kv[0].eq_ignore_ascii_case("authprotocol")
+                || kv[0].eq_ignore_ascii_case("authproto")
+            {
+                ret.auth_protocol = kv[1].parse()?;
+            } else if kv[0].eq_ignore_ascii_case("auth") {
+                if kv[1].eq_ignore_ascii_case("NoAuthNoPriv") {
+                    ret.auth = Auth::NoAuthNoPriv;
+                } else if kv[1].eq_ignore_ascii_case("AuthNoPriv") {
+                    ret.auth = Auth::AuthNoPriv;
+                } else if kv[1].eq_ignore_ascii_case("AuthPriv") {
+                    ret.auth = Auth::AuthPriv {
+                        cipher: ciph.clone(),
+                        privacy_password: pp.clone(),
+                    };
+                } else {
+                    return Err(crate::SnmpError::Crypto(format!("Invalid auth {}", kv[1])));
                 }
-                "password" | "authentication_password" => {
-                    ret.authentication_password = crate::unescape_ascii(kv[1]);
+            } else if kv[0].eq_ignore_ascii_case("cipher") {
+                ciph = kv[1].parse()?;
+                match &mut ret.auth {
+                    Auth::AuthPriv {
+                        cipher,
+                        privacy_password: _,
+                    } => {
+                        *cipher = ciph;
+                    }
+                    _ => {}
+                };
+            } else if kv[0].eq_ignore_ascii_case("privacy")
+                || kv[0].eq_ignore_ascii_case("privacy_password")
+            {
+                pp = crate::unescape_ascii(kv[1]);
+                match &mut ret.auth {
+                    Auth::AuthPriv {
+                        cipher: _,
+                        privacy_password,
+                    } => {
+                        *privacy_password = pp.clone();
+                    }
+                    _ => {}
                 }
-                "authprotocol" | "AuthProtocol" | "authproto" => {
-                    ret.auth_protocol = kv[1].parse()?;
-                }
-                "auth" | "Auth" => match kv[1] {
-                    "NoAuthNoPriv" | "noauthnopriv" => {
-                        ret.auth = Auth::NoAuthNoPriv;
-                    }
-                    "AuthNoPriv" | "authnopriv" => {
-                        ret.auth = Auth::AuthNoPriv;
-                    }
-                    "AuthPriv" | "authpriv" => {
-                        ret.auth = Auth::AuthPriv {
-                            cipher: ciph.clone(),
-                            privacy_password: pp.clone(),
-                        };
-                    }
-                    _ => {
-                        return Err(crate::SnmpError::Crypto(format!("Invalid auth {}", term)));
-                    }
-                },
-                "cipher" | "Cipher" => {
-                    ciph = kv[1].parse()?;
-                    match &mut ret.auth {
-                        Auth::AuthPriv {
-                            cipher,
-                            privacy_password: _,
-                        } => {
-                            *cipher = ciph;
-                        }
-                        _ => {}
-                    }
-                }
-                "privacy" | "privacy_password" => {
-                    pp = crate::unescape_ascii(kv[1]);
-                    match &mut ret.auth {
-                        Auth::AuthPriv {
-                            cipher: _,
-                            privacy_password,
-                        } => {
-                            *privacy_password = pp.clone();
-                        }
-                        _ => {}
-                    }
-                }
-                _ => {
-                    return Err(crate::SnmpError::Crypto(format!("Unknown term {}", term)));
-                }
+            } else {
+                return Err(crate::SnmpError::Crypto(format!("Unknown term {}", kv[0])));
             }
         }
         if ret.auth != Auth::NoAuthNoPriv {
@@ -889,12 +897,12 @@ pub enum AuthProtocol {
 impl fmt::Display for AuthProtocol {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            AuthProtocol::Md5 => write!(f, "Md5"),
-            AuthProtocol::Sha1 => write!(f, "Sha1"),
-            AuthProtocol::Sha224 => write!(f, "Sha224"),
-            AuthProtocol::Sha256 => write!(f, "Sha256"),
-            AuthProtocol::Sha384 => write!(f, "Sha384"),
-            AuthProtocol::Sha512 => write!(f, "Sha512"),
+            AuthProtocol::Md5 => f.write_str(AUTH_PROTOCOL_MD5),
+            AuthProtocol::Sha1 => f.write_str(AUTH_PROTOCOL_SHA1),
+            AuthProtocol::Sha224 => f.write_str(AUTH_PROTOCOL_SHA224),
+            AuthProtocol::Sha256 => f.write_str(AUTH_PROTOCOL_SHA256),
+            AuthProtocol::Sha384 => f.write_str(AUTH_PROTOCOL_SHA384),
+            AuthProtocol::Sha512 => f.write_str(AUTH_PROTOCOL_SHA512),
         }
     }
 }
@@ -927,14 +935,20 @@ impl AuthProtocol {
 impl std::str::FromStr for AuthProtocol {
     type Err = crate::SnmpError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "md5" | "MD5" | "Md5" => Ok(AuthProtocol::Md5),
-            "sha1" | "Sha1" => Ok(AuthProtocol::Sha1),
-            "sha224" | "Sha224" => Ok(AuthProtocol::Sha224),
-            "sha256" | "Sha256" => Ok(AuthProtocol::Sha256),
-            "sha384" | "Sha384" => Ok(AuthProtocol::Sha384),
-            "sha512" | "Sha512" => Ok(AuthProtocol::Sha512),
-            _ => Err(SnmpError::Crypto(format!("Invalid AuthProtocol={}", s))),
+        if s.eq_ignore_ascii_case(AUTH_PROTOCOL_MD5) {
+            Ok(AuthProtocol::Md5)
+        } else if s.eq_ignore_ascii_case(AUTH_PROTOCOL_SHA1) {
+            Ok(AuthProtocol::Sha1)
+        } else if s.eq_ignore_ascii_case(AUTH_PROTOCOL_SHA224) {
+            Ok(AuthProtocol::Sha224)
+        } else if s.eq_ignore_ascii_case(AUTH_PROTOCOL_SHA256) {
+            Ok(AuthProtocol::Sha256)
+        } else if s.eq_ignore_ascii_case(AUTH_PROTOCOL_SHA384) {
+            Ok(AuthProtocol::Sha384)
+        } else if s.eq_ignore_ascii_case(AUTH_PROTOCOL_SHA512) {
+            Ok(AuthProtocol::Sha512)
+        } else {
+            Err(SnmpError::Crypto(format!("Invalid AuthProtocol={}", s)))
         }
     }
 }
@@ -950,10 +964,10 @@ pub enum Cipher {
 impl fmt::Display for Cipher {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Cipher::Des => write!(f, "Des"),
-            Cipher::Aes128 => write!(f, "Aes128"),
-            Cipher::Aes192 => write!(f, "Aes192"),
-            Cipher::Aes256 => write!(f, "Aes256"),
+            Cipher::Des => f.write_str(CIPHER_DES),
+            Cipher::Aes128 => f.write_str(CIPHER_AES128),
+            Cipher::Aes192 => f.write_str(CIPHER_AES192),
+            Cipher::Aes256 => f.write_str(CIPHER_AES256),
         }
     }
 }
@@ -995,12 +1009,16 @@ impl Cipher {
 impl std::str::FromStr for Cipher {
     type Err = crate::SnmpError;
     fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "des" | "Des" | "DES" => Ok(Cipher::Des),
-            "aes128" | "Aes128" | "AES128" => Ok(Cipher::Aes128),
-            "aes192" | "Aes192" | "AES192" => Ok(Cipher::Aes192),
-            "aes256" | "Aes256" | "AES256" => Ok(Cipher::Aes256),
-            _ => Err(SnmpError::Crypto(format!("Invalid Cipher={}", s))),
+        if s.eq_ignore_ascii_case(CIPHER_DES) {
+            Ok(Cipher::Des)
+        } else if s.eq_ignore_ascii_case(CIPHER_AES128) || s.eq_ignore_ascii_case("AES") {
+            Ok(Cipher::Aes128)
+        } else if s.eq_ignore_ascii_case(CIPHER_AES192) {
+            Ok(Cipher::Aes192)
+        } else if s.eq_ignore_ascii_case(CIPHER_AES256) {
+            Ok(Cipher::Aes192)
+        } else {
+            Err(SnmpError::Crypto(format!("Invalid Cipher={}", s)))
         }
     }
 }
